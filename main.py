@@ -98,7 +98,7 @@ def main(
         sys.exit(1)
     console.print(f"[green]✓[/green] {len(known_encodings)} face encoding(s) loaded.\n")
 
-    # 6. STAGE 2: Search
+    # 6. STAGE 3: Search
     console.print("[bold]Stage 3:[/bold] Searching for matches...")
     matches: List[Path] = []
     for image_path in track(cached_images, description="Scanning..."):
