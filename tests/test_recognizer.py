@@ -1,5 +1,4 @@
 import numpy as np
-import pytest
 from unittest.mock import patch, MagicMock
 
 from recognizer import encode_references, is_match
