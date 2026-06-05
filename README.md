@@ -37,15 +37,20 @@ The Drive folder must be set to **"Anyone with the link can view"**.
 | `--url` | required | Public Google Drive folder URL |
 | `--reference` | required | Reference photo(s) of the target person — repeat for multiple |
 | `--output` | `./results` | Folder to copy matched images into |
-| `--tolerance` | `0.5` | Match threshold: lower = stricter (range 0.1–1.0) |
+| `--tolerance` | `0.25` | Match threshold: lower = stricter (range 0.1–1.0) |
 | `--no-cache` | off | Force re-download even if the folder is already cached |
 
 ## Tips
 
 - Use 3–5 reference photos in varied lighting and angles for best accuracy
-- False positives? Lower `--tolerance` (try `0.4`)
-- Missing matches? Raise `--tolerance` (try `0.6`)
+- False positives? Lower `--tolerance` (try `0.2`)
+- Missing matches? Raise `--tolerance` (try `0.3`)
 - Re-runs on the same folder skip download — images are cached in `.cache/`
+
+## Limitations
+
+- **Small or distant faces are skipped.** The face detector (HOG) requires a face to be reasonably large in the frame — roughly 80×80 pixels or larger after the image is scaled to 1800px on its longest side. Photos where the subject is far from the camera or faces are very small will not be detected and will be silently excluded from results.
+- **Folders larger than 50 files require a Google API key.** Set `GOOGLE_API_KEY` in a `.env` file at the project root. Without it, only the first 50 files are downloaded (gdown limitation).
 
 ## How it works
 

@@ -4,6 +4,9 @@ from pathlib import Path
 from typing import List
 
 import click
+from dotenv import load_dotenv
+
+load_dotenv()
 from rich.console import Console
 from rich.progress import track
 
@@ -34,7 +37,7 @@ console = Console()
 )
 @click.option(
     "--tolerance",
-    default=0.5,
+    default=0.25,
     show_default=True,
     type=click.FloatRange(0.1, 1.0),
     help="Face match threshold — lower is stricter",
@@ -69,18 +72,21 @@ def main(
         shutil.rmtree(cache_dir)
         console.print(f"[dim]Cache cleared for folder {folder_id}[/dim]")
 
-    # 4. STAGE 1: Download
-    console.print(f"\n[bold]Stage 1:[/bold] Syncing images → {cache_dir}")
-    try:
-        download_images(url, cache_dir)
-    except Exception as exc:
-        console.print(f"[red]Download failed:[/red] {exc}")
-        console.print(
-            "Make sure the folder sharing is set to 'Anyone with the link can view'."
-        )
-        sys.exit(1)
-
+    # 4. STAGE 1: Download (skip if already cached)
     cached_images = list_cached_images(cache_dir)
+    if cached_images:
+        console.print(f"\n[bold]Stage 1:[/bold] Using cached images in {cache_dir}")
+    else:
+        console.print(f"\n[bold]Stage 1:[/bold] Syncing images → {cache_dir}")
+        try:
+            download_images(url, cache_dir)
+        except Exception as exc:
+            console.print(f"[red]Download failed:[/red] {exc}")
+            console.print(
+                "Make sure the folder sharing is set to 'Anyone with the link can view'."
+            )
+            sys.exit(1)
+        cached_images = list_cached_images(cache_dir)
     if not cached_images:
         console.print("[yellow]No images (.jpg/.jpeg/.png) found in the Drive folder.[/yellow]")
         sys.exit(0)

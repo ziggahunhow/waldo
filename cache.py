@@ -3,7 +3,7 @@ from typing import List
 
 
 _CACHE_ROOT = Path(".cache")
-_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png"}
+_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".heic"}
 
 
 def get_cache_dir(folder_id: str) -> Path:
