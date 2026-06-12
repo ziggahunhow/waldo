@@ -567,6 +567,42 @@
       font-size: 0.74rem;
     }
 
+    /* ── Detector toggle ── */
+    .detector-toggle {
+      display: flex;
+    }
+
+    .detector-opt {
+      flex: 1;
+      padding: 0.5rem 0.75rem;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      color: var(--text-muted);
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.62rem;
+      font-weight: 300;
+      letter-spacing: 0.1em;
+      cursor: pointer;
+      transition: background 0.2s, color 0.2s, border-color 0.2s;
+      text-align: center;
+    }
+
+    .detector-opt + .detector-opt { border-left: none; }
+
+    .detector-opt.active {
+      background: var(--surface-3);
+      border-color: var(--amber-border);
+      color: var(--amber);
+    }
+
+    .detector-sub {
+      margin-top: 0.4rem;
+      font-size: 0.58rem;
+      color: var(--text-muted);
+      letter-spacing: 0.04em;
+      min-height: 0.9rem;
+    }
+
     /* ── Cache row ── */
     .cache-row {
       display: flex;
@@ -997,6 +1033,16 @@
             </div>
           </div>
 
+          <!-- Detector -->
+          <div>
+            <div class="field-label">Detection model</div>
+            <div class="detector-toggle">
+              <button class="detector-opt" data-value="mediapipe">MediaPipe</button>
+              <button class="detector-opt" data-value="hog">HOG</button>
+            </div>
+            <div class="detector-sub" id="detector-sub"></div>
+          </div>
+
           <!-- Cache -->
           <div>
             <div class="field-label">Cached data</div>
@@ -1117,6 +1163,26 @@
     });
 
     updateSliderBg();
+
+    // ── Detector toggle ──
+    const detectorOpts = document.querySelectorAll('.detector-opt');
+    const detectorSub  = document.getElementById('detector-sub');
+    const _detectorDesc = {
+      mediapipe: 'better with tilted & angled faces · slightly slower',
+      hog:       'fast · works best with frontal faces',
+    };
+
+    let currentDetector = localStorage.getItem('facefind_detector') || 'mediapipe';
+
+    function setDetector(val) {
+      currentDetector = val;
+      detectorOpts.forEach(btn => btn.classList.toggle('active', btn.dataset.value === val));
+      detectorSub.textContent = _detectorDesc[val] || '';
+      localStorage.setItem('facefind_detector', val);
+    }
+
+    detectorOpts.forEach(btn => btn.addEventListener('click', () => setDetector(btn.dataset.value)));
+    setDetector(currentDetector);
 
     // ── Advanced toggle ──
     const advToggle = document.getElementById('adv-toggle');
@@ -1284,6 +1350,7 @@
       const formData = new FormData();
       urls.forEach(u => formData.append('url', u));
       formData.append('tolerance', tolSlider.value);
+      formData.append('detector', currentDetector);
       selectedFiles.forEach(f => formData.append('references', f));
 
       _abortController = new AbortController();

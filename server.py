@@ -33,6 +33,9 @@ def index():
 def search():
     urls = [u.strip() for u in request.form.getlist("url") if u.strip()]
     tolerance = float(request.form.get("tolerance", 0.25))
+    detector = request.form.get("detector", "mediapipe")
+    if detector not in ("hog", "mediapipe"):
+        detector = "mediapipe"
     ref_files = request.files.getlist("references")
 
     # Save uploads before the generator runs (request context won't survive the stream)
@@ -86,7 +89,7 @@ def search():
                 yield sse({"type": "error", "msg": "No reference photos uploaded"})
                 return
 
-            known = encode_references(ref_paths)
+            known = encode_references(ref_paths, detector=detector)
             if not known:
                 yield sse({"type": "error", "msg": "No faces detected in any reference photo"})
                 return
@@ -95,7 +98,7 @@ def search():
 
             for i, (img_path, folder_id) in enumerate(all_images):
                 try:
-                    if is_match(str(img_path), known, tolerance=tolerance):
+                    if is_match(str(img_path), known, tolerance=tolerance, detector=detector):
                         yield sse({"type": "match", "filename": img_path.name, "folder_id": folder_id})
                 except Exception:
                     pass
