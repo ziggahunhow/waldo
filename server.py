@@ -34,8 +34,9 @@ def search():
     urls = [u.strip() for u in request.form.getlist("url") if u.strip()]
     tolerance = float(request.form.get("tolerance", 0.25))
     detector = request.form.get("detector", "mediapipe")
-    if detector not in ("hog", "mediapipe"):
+    if detector not in ("hog", "mediapipe", "cnn"):
         detector = "mediapipe"
+    output_dir = request.form.get("output", "results").strip() or "results"
     ref_files = request.files.getlist("references")
 
     # Save uploads before the generator runs (request context won't survive the stream)
@@ -96,15 +97,19 @@ def search():
 
             yield sse({"type": "stage", "msg": f"Searching {len(all_images)} images…"})
 
+            out_path = Path(output_dir)
+            out_path.mkdir(parents=True, exist_ok=True)
+
             for i, (img_path, folder_id) in enumerate(all_images):
                 try:
                     if is_match(str(img_path), known, tolerance=tolerance, detector=detector):
+                        shutil.copy2(img_path, out_path / img_path.name)
                         yield sse({"type": "match", "filename": img_path.name, "folder_id": folder_id})
                 except Exception:
                     pass
                 yield sse({"type": "progress", "current": i + 1, "total": len(all_images)})
 
-            yield sse({"type": "done"})
+            yield sse({"type": "done", "output_dir": str(out_path)})
 
         except Exception as e:
             yield sse({"type": "error", "msg": str(e)})

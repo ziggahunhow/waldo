@@ -906,6 +906,79 @@
     .btn-download-sel:hover { opacity: 0.85; }
     .btn-download-sel:disabled { opacity: 0.4; cursor: default; }
 
+    /* ── Lightbox ── */
+    .lightbox {
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.92);
+      z-index: 500;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-direction: column;
+      gap: 1rem;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.2s;
+    }
+
+    .lightbox.visible {
+      opacity: 1;
+      pointer-events: all;
+    }
+
+    .lightbox img {
+      max-width: min(90vw, 1200px);
+      max-height: 82vh;
+      object-fit: contain;
+      display: block;
+      box-shadow: 0 16px 64px rgba(0,0,0,0.8);
+    }
+
+    .lightbox-name {
+      font-size: 0.65rem;
+      color: var(--text-muted);
+      letter-spacing: 0.1em;
+    }
+
+    .lightbox-close {
+      position: absolute;
+      top: 1.5rem;
+      right: 1.5rem;
+      background: none;
+      border: 1px solid var(--border);
+      color: var(--text-muted);
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.65rem;
+      padding: 0.35rem 0.65rem;
+      cursor: pointer;
+      letter-spacing: 0.1em;
+      transition: color 0.15s, border-color 0.15s;
+    }
+
+    .lightbox-close:hover { color: var(--text); border-color: var(--text-dim); }
+
+    .result-expand {
+      position: absolute;
+      top: 6px;
+      left: 6px;
+      width: 22px;
+      height: 22px;
+      background: rgba(0,0,0,0.65);
+      border: none;
+      color: var(--text-dim);
+      font-size: 0.65rem;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      z-index: 3;
+      transition: color 0.15s, background 0.15s;
+    }
+
+    .result-item:hover .result-expand { display: flex; }
+    .result-expand:hover { color: var(--text); background: rgba(0,0,0,0.85); }
+
     /* ── Empty/error states ── */
     .status-msg {
       text-align: center;
@@ -1039,6 +1112,7 @@
             <div class="detector-toggle">
               <button class="detector-opt" data-value="mediapipe">MediaPipe</button>
               <button class="detector-opt" data-value="hog">HOG</button>
+              <button class="detector-opt" data-value="cnn">CNN</button>
             </div>
             <div class="detector-sub" id="detector-sub"></div>
           </div>
@@ -1082,6 +1156,13 @@
       <div class="results-grid" id="results-grid"></div>
     </div>
 
+  </div>
+
+  <!-- Lightbox -->
+  <div class="lightbox" id="lightbox">
+    <button class="lightbox-close" id="lightbox-close">✕ close</button>
+    <img id="lightbox-img" src="" alt="">
+    <span class="lightbox-name" id="lightbox-name"></span>
   </div>
 
   <!-- Selection action bar -->
@@ -1168,8 +1249,9 @@
     const detectorOpts = document.querySelectorAll('.detector-opt');
     const detectorSub  = document.getElementById('detector-sub');
     const _detectorDesc = {
-      mediapipe: 'better with tilted & angled faces · slightly slower',
-      hog:       'fast · works best with frontal faces',
+      mediapipe: 'better with tilted & angled faces · fast',
+      hog:       'fastest · frontal faces only',
+      cnn:       'best accuracy & pose handling · significantly slower',
     };
 
     let currentDetector = localStorage.getItem('facefind_detector') || 'mediapipe';
@@ -1351,6 +1433,7 @@
       urls.forEach(u => formData.append('url', u));
       formData.append('tolerance', tolSlider.value);
       formData.append('detector', currentDetector);
+      formData.append('output', document.getElementById('output-path').value || 'results');
       selectedFiles.forEach(f => formData.append('references', f));
 
       _abortController = new AbortController();
@@ -1414,7 +1497,8 @@
             } else if (ev.type === 'done') {
               progressFill.style.width = '100%';
               progressPct.textContent = '100%';
-              progressLbl.textContent = `complete — ${matches} match${matches !== 1 ? 'es' : ''} found`;
+              const saved = ev.output_dir ? ` · saved to ./${ev.output_dir}` : '';
+              progressLbl.textContent = `complete — ${matches} match${matches !== 1 ? 'es' : ''} found${saved}`;
             } else if (ev.type === 'error') {
               progressLbl.textContent = 'error: ' + ev.msg;
             }
@@ -1516,13 +1600,39 @@
       item.innerHTML = `
         <img src="${imgUrl}" alt="${filename}" loading="lazy">
         <div class="result-check">✓</div>
+        <button class="result-expand" title="View full size">⤢</button>
         <div class="result-name">${filename}</div>
       `;
+
+      item.querySelector('.result-expand').addEventListener('click', e => {
+        e.stopPropagation();
+        openLightbox(imgUrl, filename);
+      });
 
       item.addEventListener('click', () => setSelected(item, folder_id, filename, !item.classList.contains('selected')));
       resultsGrid.appendChild(item);
     }
 
+    // ── Lightbox ──
+    const lightbox      = document.getElementById('lightbox');
+    const lightboxImg   = document.getElementById('lightbox-img');
+    const lightboxName  = document.getElementById('lightbox-name');
+    const lightboxClose = document.getElementById('lightbox-close');
+
+    function openLightbox(src, name) {
+      lightboxImg.src = src;
+      lightboxName.textContent = name;
+      lightbox.classList.add('visible');
+    }
+
+    function closeLightbox() {
+      lightbox.classList.remove('visible');
+      lightboxImg.src = '';
+    }
+
+    lightboxClose.addEventListener('click', closeLightbox);
+    lightbox.addEventListener('click', e => { if (e.target === lightbox) closeLightbox(); });
+    document.addEventListener('keydown', e => { if (e.key === 'Escape') closeLightbox(); });
   </script>
 
 </body>

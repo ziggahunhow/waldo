@@ -13,7 +13,7 @@ from rich.progress import track
 from cache import get_cache_dir, list_cached_images
 from drive import download_images, extract_folder_id
 from output import copy_matches, print_matches
-from recognizer import encode_references, is_match
+from recognizer import DETECTORS, encode_references, is_match
 
 
 console = Console()
@@ -43,6 +43,13 @@ console = Console()
     help="Face match threshold — lower is stricter",
 )
 @click.option(
+    "--detector",
+    default="mediapipe",
+    show_default=True,
+    type=click.Choice(DETECTORS),
+    help="Face detection model",
+)
+@click.option(
     "--no-cache",
     is_flag=True,
     default=False,
@@ -53,6 +60,7 @@ def main(
     references: List[str],
     output_dir: str,
     tolerance: float,
+    detector: str,
     no_cache: bool,
 ) -> None:
     """Find photos containing a specific person in a public Google Drive folder."""
@@ -94,8 +102,8 @@ def main(
     console.print(f"[green]✓[/green] {len(cached_images)} image(s) ready.\n")
 
     # 5. Encode reference photos
-    console.print(f"[bold]Stage 2:[/bold] Encoding {len(references)} reference photo(s)...")
-    known_encodings = encode_references(list(references))
+    console.print(f"[bold]Stage 2:[/bold] Encoding {len(references)} reference photo(s) [{detector}]...")
+    known_encodings = encode_references(list(references), detector=detector)
     if not known_encodings:
         console.print(
             "[red]Error:[/red] No faces detected in any reference photo. "
@@ -109,7 +117,7 @@ def main(
     matches: List[Path] = []
     for image_path in track(cached_images, description="Scanning..."):
         try:
-            if is_match(str(image_path), known_encodings, tolerance=tolerance):
+            if is_match(str(image_path), known_encodings, tolerance=tolerance, detector=detector):
                 matches.append(image_path)
         except Exception as exc:
             console.print(f"[yellow]Skipping {image_path.name}:[/yellow] {exc}")

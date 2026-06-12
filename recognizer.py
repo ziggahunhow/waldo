@@ -1,11 +1,25 @@
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 import face_recognition
 import numpy as np
 
 _MAX_DIMENSION = 1800
-DETECTORS = ("hog", "mediapipe")
+DETECTORS = ("mediapipe", "hog", "cnn")
+
+# Lazy singleton — created once, reused for the lifetime of the process.
+_mp_detector = None
+
+
+def _get_mp_detector():
+    global _mp_detector
+    if _mp_detector is None:
+        import mediapipe as mp
+        _mp_detector = mp.solutions.face_detection.FaceDetection(
+            model_selection=1,
+            min_detection_confidence=0.4,
+        )
+    return _mp_detector
 
 
 def _load_image(path: str) -> np.ndarray:
@@ -29,16 +43,13 @@ def _locations_hog(image: np.ndarray) -> list:
     return face_recognition.face_locations(image, model="hog", number_of_times_to_upsample=1)
 
 
-def _locations_mediapipe(image: np.ndarray) -> list:
-    import mediapipe as mp
+def _locations_cnn(image: np.ndarray) -> list:
+    return face_recognition.face_locations(image, model="cnn")
 
+
+def _locations_mediapipe(image: np.ndarray) -> list:
     h, w = image.shape[:2]
-    detector = mp.solutions.face_detection.FaceDetection(
-        model_selection=1,
-        min_detection_confidence=0.4,
-    )
-    result = detector.process(image)
-    detector.close()
+    result = _get_mp_detector().process(image)
 
     if not result.detections:
         return []
@@ -55,7 +66,13 @@ def _locations_mediapipe(image: np.ndarray) -> list:
 
 
 def _face_encodings(image: np.ndarray, detector: str = "mediapipe") -> List[np.ndarray]:
-    locs = _locations_mediapipe(image) if detector == "mediapipe" else _locations_hog(image)
+    if detector == "mediapipe":
+        locs = _locations_mediapipe(image)
+    elif detector == "cnn":
+        locs = _locations_cnn(image)
+    else:
+        locs = _locations_hog(image)
+
     if not locs:
         return []
     return face_recognition.face_encodings(image, known_face_locations=locs)
