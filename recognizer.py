@@ -47,9 +47,42 @@ def encode_references(reference_paths: List[str]) -> List[np.ndarray]:
     return encodings
 
 
+def _mediapipe_face_locations(image: np.ndarray) -> list:
+    """Detect faces using MediaPipe and return locations in dlib's (top,right,bottom,left) format."""
+    import mediapipe as mp
+
+    h, w = image.shape[:2]
+    detector = mp.solutions.face_detection.FaceDetection(
+        model_selection=1,       # 1 = full-range model (handles tilted/distant faces)
+        min_detection_confidence=0.4,
+    )
+    result = detector.process(image)
+    detector.close()
+
+    if not result.detections:
+        return []
+
+    locs = []
+    for det in result.detections:
+        bb = det.location_data.relative_bounding_box
+        # clamp to [0,1] in case of out-of-frame detections
+        x1 = max(0.0, bb.xmin)
+        y1 = max(0.0, bb.ymin)
+        x2 = min(1.0, bb.xmin + bb.width)
+        y2 = min(1.0, bb.ymin + bb.height)
+        top    = int(y1 * h)
+        right  = int(x2 * w)
+        bottom = int(y2 * h)
+        left   = int(x1 * w)
+        locs.append((top, right, bottom, left))
+    return locs
+
+
 def _face_encodings(image: np.ndarray) -> List[np.ndarray]:
-    """Detect faces and return encodings. Images where no face is detected are skipped."""
-    locs = face_recognition.face_locations(image, model="hog", number_of_times_to_upsample=1)
+    """Detect faces with MediaPipe and return dlib encodings."""
+    locs = _mediapipe_face_locations(image)
+    if not locs:
+        return []
     return face_recognition.face_encodings(image, known_face_locations=locs)
 
 
