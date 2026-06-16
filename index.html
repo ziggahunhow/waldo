@@ -225,6 +225,58 @@
     .btn-add-url:hover { color: var(--amber); }
 
     /* ── Paste & extract ── */
+    .paste-divider {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      margin: 0.9rem 0;
+    }
+
+    .paste-divider::before,
+    .paste-divider::after {
+      content: '';
+      flex: 1;
+      height: 1px;
+      background: var(--border);
+    }
+
+    .paste-divider span {
+      font-size: 0.6rem;
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+      color: var(--text-muted);
+    }
+
+    .btn-paste-toggle {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0.6rem;
+      width: 100%;
+      background: var(--surface);
+      border: 1px dashed var(--border);
+      color: var(--text-dim);
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.68rem;
+      font-weight: 300;
+      letter-spacing: 0.08em;
+      padding: 0.85rem;
+      cursor: pointer;
+      transition: border-color 0.2s, background 0.2s, color 0.2s;
+    }
+
+    .btn-paste-toggle:hover,
+    .btn-paste-toggle.open {
+      border-color: var(--amber-border);
+      background: var(--amber-glow);
+      color: var(--amber);
+    }
+
+    .paste-icon {
+      font-size: 0.9rem;
+      line-height: 1;
+    }
+
     .paste-extract {
       margin-top: 10px;
       display: flex;
@@ -1075,7 +1127,13 @@
       </div>
       <div class="url-list" id="url-list"></div>
       <button class="btn-add-url" id="btn-add-url">+ add another folder</button>
-      <button class="btn-add-url" id="btn-toggle-paste">paste text to extract links</button>
+
+      <div class="paste-divider"><span>or</span></div>
+
+      <button class="btn-paste-toggle" id="btn-toggle-paste">
+        <span class="paste-icon">⎘</span>
+        <span id="btn-toggle-paste-label">Paste text to extract links</span>
+      </button>
 
       <div class="paste-extract" id="paste-extract" style="display:none;">
         <textarea id="paste-text" rows="4" spellcheck="false"
@@ -1290,10 +1348,13 @@
 
     const DRIVE_LINK_RE = /https:\/\/drive\.google\.com\/drive\/(?:u\/\d+\/)?folders\/[a-zA-Z0-9_-]+/g;
 
+    const btnTogglePasteLabel = document.getElementById('btn-toggle-paste-label');
+
     btnTogglePaste.addEventListener('click', () => {
       const showing = pasteExtract.style.display !== 'none';
       pasteExtract.style.display = showing ? 'none' : 'flex';
-      btnTogglePaste.textContent = showing ? 'paste text to extract links' : 'hide paste box';
+      btnTogglePaste.classList.toggle('open', !showing);
+      btnTogglePasteLabel.textContent = showing ? 'Paste text to extract links' : 'Hide paste box';
       if (!showing) pasteText.focus();
     });
 
