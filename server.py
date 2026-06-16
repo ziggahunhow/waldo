@@ -8,7 +8,7 @@ import zipfile
 from pathlib import Path
 
 from dotenv import load_dotenv
-from flask import Flask, Response, request, send_file, stream_with_context
+from flask import Flask, Response, abort, request, send_file, stream_with_context
 
 load_dotenv()
 sys.path.insert(0, str(Path(__file__).parent))
@@ -182,6 +182,22 @@ def serve_image(folder_id, filename):
         return send_file(buf, mimetype="image/jpeg")
 
     return send_file(str(img_path))
+
+
+@app.route("/line/webhook", methods=["POST"])
+def line_webhook():
+    from line_bot import handler as _line_handler
+    from linebot.v3.exceptions import InvalidSignatureError
+
+    signature = request.headers.get("X-Line-Signature", "")
+    body = request.get_data(as_text=True)
+    try:
+        _line_handler.handle(body, signature)
+    except InvalidSignatureError:
+        abort(400, "Invalid LINE signature")
+    except Exception as e:
+        abort(500, str(e))
+    return "OK"
 
 
 if __name__ == "__main__":

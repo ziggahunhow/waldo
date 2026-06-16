@@ -7,4 +7,5 @@ Pillow>=10.0
 pillow-heif>=0.13
 mediapipe>=0.10
 rich>=13.0
+line-bot-sdk>=3.0
 pytest>=8.0
