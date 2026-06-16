@@ -7,7 +7,7 @@ import requests
 
 
 _FOLDER_URL_RE = re.compile(
-    r"https://drive\.google\.com/drive/folders/([a-zA-Z0-9_-]+)"
+    r"https://drive\.google\.com/drive/(?:u/\d+/)?folders/([a-zA-Z0-9_-]+)"
 )
 _DRIVE_API = "https://www.googleapis.com/drive/v3/files"
 _FILE_DOWNLOAD = "https://drive.google.com/uc"

@@ -224,6 +224,58 @@
 
     .btn-add-url:hover { color: var(--amber); }
 
+    /* ── Paste & extract ── */
+    .paste-extract {
+      margin-top: 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    textarea {
+      width: 100%;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      color: var(--text);
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.72rem;
+      font-weight: 300;
+      padding: 0.75rem 0.9rem;
+      outline: none;
+      resize: vertical;
+      transition: border-color 0.2s, background 0.2s;
+    }
+
+    textarea::placeholder { color: var(--text-muted); }
+    textarea:focus { border-color: var(--amber-border); background: var(--surface-2); }
+
+    .paste-actions {
+      display: flex;
+      align-items: center;
+      gap: 0.9rem;
+    }
+
+    .btn-extract {
+      background: none;
+      border: 1px solid var(--amber-border);
+      color: var(--amber);
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.63rem;
+      font-weight: 400;
+      letter-spacing: 0.1em;
+      padding: 0.45rem 0.9rem;
+      cursor: pointer;
+      transition: background 0.2s, color 0.2s;
+    }
+
+    .btn-extract:hover { background: var(--amber-glow); }
+
+    .extract-status {
+      font-size: 0.62rem;
+      color: var(--text-muted);
+      letter-spacing: 0.05em;
+    }
+
     /* ── Drop zone ── */
     .dropzone {
       border: 1px dashed var(--border);
@@ -1023,6 +1075,16 @@
       </div>
       <div class="url-list" id="url-list"></div>
       <button class="btn-add-url" id="btn-add-url">+ add another folder</button>
+      <button class="btn-add-url" id="btn-toggle-paste">paste text to extract links</button>
+
+      <div class="paste-extract" id="paste-extract" style="display:none;">
+        <textarea id="paste-text" rows="4" spellcheck="false"
+          placeholder="Paste an email, chat log, or doc containing Drive folder links…"></textarea>
+        <div class="paste-actions">
+          <button class="btn-extract" id="btn-extract">Extract links</button>
+          <span class="extract-status" id="extract-status"></span>
+        </div>
+      </div>
     </div>
 
     <!-- Step 2: Reference photos -->
@@ -1218,6 +1280,52 @@
     });
 
     addUrlRow(); // initial row
+
+    // ── Paste & extract ──
+    const btnTogglePaste = document.getElementById('btn-toggle-paste');
+    const pasteExtract   = document.getElementById('paste-extract');
+    const pasteText      = document.getElementById('paste-text');
+    const btnExtract     = document.getElementById('btn-extract');
+    const extractStatus  = document.getElementById('extract-status');
+
+    const DRIVE_LINK_RE = /https:\/\/drive\.google\.com\/drive\/(?:u\/\d+\/)?folders\/[a-zA-Z0-9_-]+/g;
+
+    btnTogglePaste.addEventListener('click', () => {
+      const showing = pasteExtract.style.display !== 'none';
+      pasteExtract.style.display = showing ? 'none' : 'flex';
+      btnTogglePaste.textContent = showing ? 'paste text to extract links' : 'hide paste box';
+      if (!showing) pasteText.focus();
+    });
+
+    btnExtract.addEventListener('click', () => {
+      const found = [...new Set(pasteText.value.match(DRIVE_LINK_RE) || [])];
+
+      if (found.length === 0) {
+        extractStatus.textContent = 'no Drive folder links found';
+        return;
+      }
+
+      const existing = getUrls();
+      const toAdd = found.filter(u => !existing.includes(u));
+
+      if (toAdd.length === 0) {
+        extractStatus.textContent = 'all links already added';
+        return;
+      }
+
+      // fill any empty rows first, then append new rows for the rest
+      const emptyInputs = Array.from(urlList.querySelectorAll('.url-input')).filter(i => !i.value.trim());
+      let i = 0;
+      for (; i < toAdd.length && i < emptyInputs.length; i++) {
+        emptyInputs[i].value = toAdd[i];
+      }
+      for (; i < toAdd.length; i++) {
+        addUrlRow(toAdd[i]);
+      }
+
+      extractStatus.textContent = `added ${toAdd.length} link${toAdd.length !== 1 ? 's' : ''}`;
+      pasteText.value = '';
+    });
 
     // ── Tolerance slider ──
     const tolSlider = document.getElementById('tolerance');
