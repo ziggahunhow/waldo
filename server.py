@@ -169,6 +169,30 @@ def download_zip():
     )
 
 
+@app.route("/api/preview", methods=["POST"])
+def preview():
+    """Convert an uploaded reference image (incl. HEIC) to a JPEG thumbnail
+    so the browser can display it — browsers can't render HEIC natively."""
+    f = request.files.get("file")
+    if not f:
+        return "No file", 400
+
+    import pillow_heif
+    from PIL import Image, ImageOps
+
+    pillow_heif.register_heif_opener()
+    try:
+        img = ImageOps.exif_transpose(Image.open(f.stream)).convert("RGB")
+    except Exception as e:
+        return f"Cannot read image: {e}", 400
+
+    img.thumbnail((400, 400))
+    buf = io.BytesIO()
+    img.save(buf, "JPEG", quality=82)
+    buf.seek(0)
+    return send_file(buf, mimetype="image/jpeg")
+
+
 @app.route("/api/image/<folder_id>/<filename>")
 def serve_image(folder_id, filename):
     """Serve a cached image, converting HEIC → JPEG for browser compatibility."""
