@@ -1,14 +1,19 @@
 from pathlib import Path
-from typing import List, Optional
+from typing import List
 
 import face_recognition
 import numpy as np
 
 _MAX_DIMENSION = 1800
-DETECTORS = ("mediapipe", "hog", "cnn")
+DETECTORS = ("mediapipe", "hog", "cnn", "insightface")
 
-# Lazy singleton — created once, reused for the lifetime of the process.
+# Detectors that produce their own embeddings (detect + align + embed fused),
+# so they bypass the dlib face_recognition encoding path and use cosine matching.
+_EMBEDDING_DETECTORS = ("insightface",)
+
+# Lazy singletons — created once, reused for the lifetime of the process.
 _mp_detector = None
+_if_app = None
 
 
 def _get_mp_detector():
@@ -20,6 +25,17 @@ def _get_mp_detector():
             min_detection_confidence=0.4,
         )
     return _mp_detector
+
+
+def _get_if_app():
+    global _if_app
+    if _if_app is None:
+        from insightface.app import FaceAnalysis
+        # buffalo_l = SCRFD detector + landmarks + ArcFace-r50 (512-dim).
+        # ctx_id=-1 and the CPU provider keep this GPU-free.
+        _if_app = FaceAnalysis(name="buffalo_l", providers=["CPUExecutionProvider"])
+        _if_app.prepare(ctx_id=-1, det_size=(640, 640))
+    return _if_app
 
 
 def _load_image(path: str) -> np.ndarray:
@@ -65,7 +81,17 @@ def _locations_mediapipe(image: np.ndarray) -> list:
     return locs
 
 
+def _encodings_insightface(image: np.ndarray) -> List[np.ndarray]:
+    """Detect, align, and embed in one pass. Returns unit-norm 512-dim vectors."""
+    # insightface expects BGR; _load_image gives RGB.
+    faces = _get_if_app().get(image[:, :, ::-1])
+    return [f.normed_embedding for f in faces]
+
+
 def _face_encodings(image: np.ndarray, detector: str = "mediapipe") -> List[np.ndarray]:
+    if detector == "insightface":
+        return _encodings_insightface(image)
+
     if detector == "mediapipe":
         locs = _locations_mediapipe(image)
     elif detector == "cnn":
@@ -76,6 +102,13 @@ def _face_encodings(image: np.ndarray, detector: str = "mediapipe") -> List[np.n
     if not locs:
         return []
     return face_recognition.face_encodings(image, known_face_locations=locs)
+
+
+def _cosine_threshold(tolerance: float) -> float:
+    """Map the dlib-style Euclidean tolerance (0.1 strict … 1.0 loose) onto a
+    cosine-similarity threshold for insightface (higher = stricter), so the same
+    UI slider keeps its 'lower = stricter' meaning across all detectors."""
+    return max(0.05, min(0.9, 0.68 - 0.8 * tolerance))
 
 
 def encode_references(reference_paths: List[str], detector: str = "mediapipe") -> List[np.ndarray]:
@@ -98,6 +131,15 @@ def is_match(
 ) -> bool:
     image = _load_image(image_path)
     candidates = _face_encodings(image, detector=detector)
+
+    if detector in _EMBEDDING_DETECTORS:
+        # Cosine similarity on unit-norm embeddings: higher = more similar.
+        threshold = _cosine_threshold(tolerance)
+        for candidate in candidates:
+            if any(float(np.dot(known, candidate)) >= threshold for known in known_encodings):
+                return True
+        return False
+
     for candidate in candidates:
         if any(face_recognition.compare_faces(known_encodings, candidate, tolerance=tolerance)):
             return True

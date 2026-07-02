@@ -678,17 +678,18 @@
 
     .detector-opt {
       flex: 1;
-      padding: 0.5rem 0.75rem;
+      padding: 0.5rem 0.4rem;
       background: var(--surface);
       border: 1px solid var(--border);
       color: var(--text-muted);
       font-family: 'JetBrains Mono', monospace;
       font-size: 0.62rem;
       font-weight: 300;
-      letter-spacing: 0.1em;
+      letter-spacing: 0.06em;
       cursor: pointer;
       transition: background 0.2s, color 0.2s, border-color 0.2s;
       text-align: center;
+      white-space: nowrap;
     }
 
     .detector-opt + .detector-opt { border-left: none; }
@@ -1233,6 +1234,7 @@
               <button class="detector-opt" data-value="mediapipe">MediaPipe</button>
               <button class="detector-opt" data-value="hog">HOG</button>
               <button class="detector-opt" data-value="cnn">CNN</button>
+              <button class="detector-opt" data-value="insightface">InsightFace</button>
             </div>
             <div class="detector-sub" id="detector-sub"></div>
           </div>
@@ -1418,9 +1420,10 @@
     const detectorOpts = document.querySelectorAll('.detector-opt');
     const detectorSub  = document.getElementById('detector-sub');
     const _detectorDesc = {
-      mediapipe: 'better with tilted & angled faces · fast',
-      hog:       'fastest · frontal faces only',
-      cnn:       'best accuracy & pose handling · significantly slower',
+      mediapipe:   'better with tilted & angled faces · fast',
+      hog:         'fastest · frontal faces only',
+      cnn:         'best accuracy & pose handling · significantly slower',
+      insightface: 'aligns faces + 512-dim embeddings · best on angled faces · moderate (first run downloads ~300MB)',
     };
 
     let currentDetector = localStorage.getItem('facefind_detector') || 'mediapipe';

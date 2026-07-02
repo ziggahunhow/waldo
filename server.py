@@ -34,7 +34,7 @@ def search():
     urls = [u.strip() for u in request.form.getlist("url") if u.strip()]
     tolerance = float(request.form.get("tolerance", 0.25))
     detector = request.form.get("detector", "mediapipe")
-    if detector not in ("hog", "mediapipe", "cnn"):
+    if detector not in ("hog", "mediapipe", "cnn", "insightface"):
         detector = "mediapipe"
     output_dir = request.form.get("output", "results").strip() or "results"
     ref_files = request.files.getlist("references")
