@@ -5,6 +5,7 @@ import shutil
 import sys
 import tempfile
 import zipfile
+from datetime import datetime
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -159,7 +160,13 @@ def download_zip():
             seen.add(name)
             zf.write(img_path, name)
     buf.seek(0)
-    return send_file(buf, mimetype="application/zip", as_attachment=True, download_name="facefind_matches.zip")
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return send_file(
+        buf,
+        mimetype="application/zip",
+        as_attachment=True,
+        download_name=f"facefind_matches_{stamp}.zip",
+    )
 
 
 @app.route("/api/image/<folder_id>/<filename>")

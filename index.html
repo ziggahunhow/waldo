@@ -208,7 +208,6 @@
     .url-remove:hover { color: #e87070; background: var(--surface-2); }
 
     .btn-add-url {
-      margin-top: 8px;
       background: none;
       border: none;
       color: var(--text-muted);
@@ -247,30 +246,27 @@
       color: var(--text-muted);
     }
 
-    .btn-paste-toggle {
+    .url-actions {
       display: flex;
       align-items: center;
-      justify-content: center;
-      gap: 0.6rem;
-      width: 100%;
-      background: var(--surface);
-      border: 1px dashed var(--border);
-      color: var(--text-dim);
-      font-family: 'JetBrains Mono', monospace;
-      font-size: 0.68rem;
-      font-weight: 300;
-      letter-spacing: 0.08em;
-      padding: 0.85rem;
-      cursor: pointer;
-      transition: border-color 0.2s, background 0.2s, color 0.2s;
+      justify-content: space-between;
+      margin-top: 8px;
     }
 
-    .btn-paste-toggle:hover,
-    .btn-paste-toggle.open {
-      border-color: var(--amber-border);
-      background: var(--amber-glow);
-      color: var(--amber);
+    .btn-clear-url {
+      background: none;
+      border: none;
+      color: var(--text-muted);
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.63rem;
+      font-weight: 300;
+      letter-spacing: 0.1em;
+      cursor: pointer;
+      padding: 0.3rem 0;
+      transition: color 0.2s;
     }
+
+    .btn-clear-url:hover { color: var(--danger); }
 
     .paste-icon {
       font-size: 0.9rem;
@@ -910,23 +906,34 @@
       outline-offset: -2px;
     }
 
-    .result-check {
+    .result-select {
       position: absolute;
       top: 6px;
       right: 6px;
-      width: 20px;
-      height: 20px;
-      background: var(--amber);
-      color: var(--bg);
-      font-size: 0.6rem;
+      width: 22px;
+      height: 22px;
+      background: rgba(0,0,0,0.55);
+      border: 1px solid rgba(255,255,255,0.45);
+      color: transparent;
+      font-size: 0.62rem;
+      font-weight: 600;
       display: none;
       align-items: center;
       justify-content: center;
-      font-weight: 600;
-      z-index: 2;
+      cursor: pointer;
+      z-index: 3;
+      transition: background 0.15s, color 0.15s, border-color 0.15s;
     }
 
-    .result-item.selected .result-check { display: flex; }
+    .result-item:hover .result-select { display: flex; }
+    .result-select:hover { border-color: var(--amber); color: var(--amber-border); }
+
+    .result-item.selected .result-select {
+      display: flex;
+      background: var(--amber);
+      border-color: var(--amber);
+      color: var(--bg);
+    }
 
     .result-name {
       position: absolute;
@@ -1063,27 +1070,6 @@
 
     .lightbox-close:hover { color: var(--text); border-color: var(--text-dim); }
 
-    .result-expand {
-      position: absolute;
-      top: 6px;
-      left: 6px;
-      width: 22px;
-      height: 22px;
-      background: rgba(0,0,0,0.65);
-      border: none;
-      color: var(--text-dim);
-      font-size: 0.65rem;
-      display: none;
-      align-items: center;
-      justify-content: center;
-      cursor: pointer;
-      z-index: 3;
-      transition: color 0.15s, background 0.15s;
-    }
-
-    .result-item:hover .result-expand { display: flex; }
-    .result-expand:hover { color: var(--text); background: rgba(0,0,0,0.85); }
-
     /* ── Empty/error states ── */
     .status-msg {
       text-align: center;
@@ -1126,23 +1112,22 @@
         <span class="step-num">01</span>
         <span class="section-label">Google Drive folders</span>
       </div>
-      <div class="url-list" id="url-list"></div>
-      <button class="btn-add-url" id="btn-add-url">+ add another folder</button>
-
-      <div class="paste-divider"><span>or</span></div>
-
-      <button class="btn-paste-toggle" id="btn-toggle-paste">
-        <span class="paste-icon">⎘</span>
-        <span id="btn-toggle-paste-label">Paste text to extract links</span>
-      </button>
-
-      <div class="paste-extract" id="paste-extract" style="display:none;">
+      <!-- Primary path: paste any text, extract the links -->
+      <div class="paste-extract" id="paste-extract">
         <textarea id="paste-text" rows="4" spellcheck="false"
-          placeholder="Paste an email, chat log, or doc containing Drive folder links…"></textarea>
+          placeholder="Paste an email, chat log, or doc — we'll pull out every Google Drive folder link…"></textarea>
         <div class="paste-actions">
-          <button class="btn-extract" id="btn-extract">Extract links</button>
+          <button class="btn-extract" id="btn-extract"><span class="paste-icon">⎘</span> Extract links</button>
           <span class="extract-status" id="extract-status"></span>
         </div>
+      </div>
+
+      <div class="paste-divider"><span>or enter manually</span></div>
+
+      <div class="url-list" id="url-list"></div>
+      <div class="url-actions">
+        <button class="btn-add-url" id="btn-add-url">+ add another folder</button>
+        <button class="btn-clear-url" id="btn-clear-url">clear all</button>
       </div>
     </div>
 
@@ -1339,26 +1324,20 @@
       row.querySelector('.url-input').focus();
     });
 
+    const btnClearUrl = document.getElementById('btn-clear-url');
+    btnClearUrl.addEventListener('click', () => {
+      urlList.innerHTML = '';
+      addUrlRow(); // leave one empty row
+    });
+
     addUrlRow(); // initial row
 
     // ── Paste & extract ──
-    const btnTogglePaste = document.getElementById('btn-toggle-paste');
-    const pasteExtract   = document.getElementById('paste-extract');
-    const pasteText      = document.getElementById('paste-text');
-    const btnExtract     = document.getElementById('btn-extract');
-    const extractStatus  = document.getElementById('extract-status');
+    const pasteText     = document.getElementById('paste-text');
+    const btnExtract    = document.getElementById('btn-extract');
+    const extractStatus = document.getElementById('extract-status');
 
     const DRIVE_LINK_RE = /https:\/\/drive\.google\.com\/drive\/(?:u\/\d+\/)?folders\/[a-zA-Z0-9_-]+/g;
-
-    const btnTogglePasteLabel = document.getElementById('btn-toggle-paste-label');
-
-    btnTogglePaste.addEventListener('click', () => {
-      const showing = pasteExtract.style.display !== 'none';
-      pasteExtract.style.display = showing ? 'none' : 'flex';
-      btnTogglePaste.classList.toggle('open', !showing);
-      btnTogglePasteLabel.textContent = showing ? 'Paste text to extract links' : 'Hide paste box';
-      if (!showing) pasteText.focus();
-    });
 
     btnExtract.addEventListener('click', () => {
       const found = [...new Set(pasteText.value.match(DRIVE_LINK_RE) || [])];
@@ -1426,7 +1405,7 @@
       insightface: 'aligns faces + 512-dim embeddings · best on angled faces · moderate (first run downloads ~300MB)',
     };
 
-    let currentDetector = localStorage.getItem('facefind_detector') || 'mediapipe';
+    let currentDetector = localStorage.getItem('facefind_detector') || 'insightface';
 
     function setDetector(val) {
       currentDetector = val;
@@ -1771,17 +1750,16 @@
       const imgUrl = `/api/image/${encodeURIComponent(folder_id)}/${encodeURIComponent(filename)}`;
       item.innerHTML = `
         <img src="${imgUrl}" alt="${filename}" loading="lazy">
-        <div class="result-check">✓</div>
-        <button class="result-expand" title="View full size">⤢</button>
+        <button class="result-select" title="Select photo">✓</button>
         <div class="result-name">${filename}</div>
       `;
 
-      item.querySelector('.result-expand').addEventListener('click', e => {
+      item.querySelector('.result-select').addEventListener('click', e => {
         e.stopPropagation();
-        openLightbox(imgUrl, filename);
+        setSelected(item, folder_id, filename, !item.classList.contains('selected'));
       });
 
-      item.addEventListener('click', () => setSelected(item, folder_id, filename, !item.classList.contains('selected')));
+      item.addEventListener('click', () => openLightbox(imgUrl, filename));
       resultsGrid.appendChild(item);
     }
 
