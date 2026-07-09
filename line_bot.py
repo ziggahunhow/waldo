@@ -10,6 +10,14 @@ Conversation flow
 Settings sub-flow (available any time refs exist):
   settings → set tolerance | set model → back to collecting_refs
 
+Rich Menu (configured externally in the LINE Developers console)
+──────────────────────────────────────────────────────────────
+  Buttons must use "postback" actions (not "message") so editing a button's
+  display label never breaks matching. Required data / displayText:
+    data=action=change_ref  displayText=更改參考照片  (clear refs, ask for new photos)
+    data=action=paste_text  displayText=貼上文字串    (ask for Drive-link text, run search)
+  See docs/superpowers/specs/2026-07-10-line-bot-chinese-triggers-design.md
+
 Setup
 ─────
   LINE_CHANNEL_SECRET       – channel secret from LINE Developer Console
@@ -52,7 +60,12 @@ from linebot.v3.messaging import (
     ReplyMessageRequest,
     TextMessage,
 )
-from linebot.v3.webhooks import ImageMessageContent, MessageEvent, TextMessageContent
+from linebot.v3.webhooks import (
+    ImageMessageContent,
+    MessageEvent,
+    PostbackEvent,
+    TextMessageContent,
+)
 
 from cache import get_cache_dir, list_cached_images
 from drive import download_images, extract_folder_id
@@ -182,7 +195,7 @@ def on_image(event: MessageEvent) -> None:
     logger.info("on_image user=%s state=%s", user_id, sess["state"])
 
     if sess["state"] == "searching":
-        _reply(event.reply_token, [_txt("Search in progress — please wait.")])
+        _reply(event.reply_token, [_txt(_SEARCHING_MSG)])
         return
 
     with ApiClient(_cfg()) as client:
@@ -383,6 +396,51 @@ def on_text(event: MessageEvent) -> None:  # noqa: C901  (state machine, complex
                 quick_reply=_search_qr() if sess["ref_paths"] else None,
             )
         ])
+
+
+# ── Postback handler (Rich Menu buttons) ────────────────────────────────────────
+
+_SEARCHING_MSG = "Search in progress — please wait."
+_REF_PHOTO_PROMPT = "請上傳3-5張人像照片"
+_PASTE_TEXT_PROMPT = "請貼上包含 Google Drive 資料夾連結的文字"
+
+_POSTBACK_CHANGE_REF = "action=change_ref"
+_POSTBACK_PASTE_TEXT = "action=paste_text"
+
+
+def _handle_change_ref(reply_token: str, sess: dict) -> None:
+    if sess["state"] == "searching":
+        _reply(reply_token, [_txt(_SEARCHING_MSG)])
+        return
+    sess["ref_paths"] = []
+    sess["state"] = "idle"
+    _reply(reply_token, [_txt(_REF_PHOTO_PROMPT)])
+
+
+def _handle_paste_text(reply_token: str, sess: dict) -> None:
+    if sess["state"] == "searching":
+        _reply(reply_token, [_txt(_SEARCHING_MSG)])
+        return
+    if not sess["ref_paths"]:
+        _reply(reply_token, [_txt(_REF_PHOTO_PROMPT)])
+        return
+    sess["state"] = "awaiting_url"
+    _reply(reply_token, [_txt(_PASTE_TEXT_PROMPT)])
+
+
+@handler.add(PostbackEvent)
+def on_postback(event: PostbackEvent) -> None:
+    user_id = event.source.user_id
+    data = event.postback.data
+    sess = _session(user_id)
+    logger.info("on_postback user=%s state=%s data=%s", user_id, sess["state"], data)
+
+    if data == _POSTBACK_CHANGE_REF:
+        _handle_change_ref(event.reply_token, sess)
+    elif data == _POSTBACK_PASTE_TEXT:
+        _handle_paste_text(event.reply_token, sess)
+    else:
+        logger.warning("on_postback user=%s unrecognized data=%s", user_id, data)
 
 
 # ── Background search ──────────────────────────────────────────────────────────
