@@ -24,9 +24,11 @@ Setup
                               bot lists filenames only.
 """
 
+import hashlib
 import logging
 import os
 import re
+import shutil
 import threading
 import time
 from pathlib import Path
@@ -63,6 +65,8 @@ _DEFAULT_DETECTOR = "insightface"
 
 _MAX_IMAGES_TO_SEND = 10
 
+ALBUMS_DIR = Path(__file__).parent / "albums"
+
 
 def _reference_photo_paths() -> list[str]:
     if not _REF_DIR.exists():
@@ -71,6 +75,26 @@ def _reference_photo_paths() -> list[str]:
         str(p) for p in _REF_DIR.iterdir()
         if p.is_file() and not p.name.startswith(".")
     )
+
+
+def _album_id(urls: list[str]) -> str:
+    """Deterministic album id for a set of Drive URLs — same URLs (any order)
+    always hash to the same id, so re-running a search refreshes the same
+    album instead of creating a new one."""
+    key = "|".join(sorted(urls))
+    return hashlib.sha256(key.encode()).hexdigest()[:12]
+
+
+def _save_album(album_id: str, matches: list[tuple[Path, str]]) -> None:
+    album_dir = ALBUMS_DIR / album_id
+    album_dir.mkdir(parents=True, exist_ok=True)
+    seen = set()
+    for img_path, folder_id in matches:
+        name = img_path.name
+        if name in seen:
+            name = f"{img_path.stem}_{folder_id[:6]}{img_path.suffix}"
+        seen.add(name)
+        shutil.copy2(img_path, album_dir / name)
 
 
 # ── LINE API helpers ───────────────────────────────────────────────────────────
@@ -228,23 +252,32 @@ def _run_search(user_id: str, urls: list[str]) -> None:
             except Exception:
                 pass
 
-        if matches and public_url:
-            for img_path, folder_id in matches[:_MAX_IMAGES_TO_SEND]:
+        if len(matches) > _MAX_IMAGES_TO_SEND:
+            album_id = _album_id(urls)
+            _save_album(album_id, matches)
+            if public_url:
+                _push(user_id, [_txt(
+                    f"📁 {len(matches)} matches — view them here:\n"
+                    f"{public_url}/album/{album_id}"
+                )])
+            else:
+                names = "\n".join(f"• {p.name}" for p, _ in matches[:20])
+                extra = f"\n…and {len(matches) - 20} more" if len(matches) > 20 else ""
+                _push(user_id, [_txt(
+                    f"Matched files:\n{names}{extra}\n\n"
+                    "Tip: set PUBLIC_URL in .env to view them as an album."
+                )])
+        elif matches and public_url:
+            for img_path, folder_id in matches:
                 img_url = f"{public_url}/api/image/{folder_id}/{img_path.name}"
                 _push(user_id, [ImageMessage(
                     original_content_url=img_url,
                     preview_image_url=img_url,
                 )])
-            if len(matches) > _MAX_IMAGES_TO_SEND:
-                _push(user_id, [_txt(
-                    f"Showing first {_MAX_IMAGES_TO_SEND} of {len(matches)} matches.\n"
-                    "Open the web UI to see all results."
-                )])
         elif matches:
-            names = "\n".join(f"• {p.name}" for p, _ in matches[:20])
-            extra = f"\n…and {len(matches) - 20} more" if len(matches) > 20 else ""
+            names = "\n".join(f"• {p.name}" for p, _ in matches)
             _push(user_id, [_txt(
-                f"Matched files:\n{names}{extra}\n\n"
+                f"Matched files:\n{names}\n\n"
                 "Tip: set PUBLIC_URL in .env to receive images directly in chat."
             )])
 

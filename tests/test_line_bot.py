@@ -81,6 +81,41 @@ def test_reference_photo_paths_missing_dir_returns_empty(tmp_path, monkeypatch):
     assert line_bot._reference_photo_paths() == []
 
 
+def test_album_id_is_deterministic_regardless_of_url_order():
+    a = ["https://drive.google.com/drive/folders/aaa", "https://drive.google.com/drive/folders/bbb"]
+    b = list(reversed(a))
+
+    assert line_bot._album_id(a) == line_bot._album_id(b)
+
+
+def test_album_id_differs_for_different_urls():
+    a = ["https://drive.google.com/drive/folders/aaa"]
+    b = ["https://drive.google.com/drive/folders/bbb"]
+
+    assert line_bot._album_id(a) != line_bot._album_id(b)
+
+
+def test_save_album_copies_files_and_dedupes_names(tmp_path, monkeypatch):
+    monkeypatch.setattr(line_bot, "ALBUMS_DIR", tmp_path)
+
+    src_a = tmp_path / "src_a"
+    src_b = tmp_path / "src_b"
+    src_a.mkdir()
+    src_b.mkdir()
+    img_a = src_a / "photo.jpg"
+    img_b = src_b / "photo.jpg"
+    img_a.write_bytes(b"aaa")
+    img_b.write_bytes(b"bbb")
+
+    line_bot._save_album("abc123", [(img_a, "folderAAA"), (img_b, "folderBBB")])
+
+    album_dir = tmp_path / "abc123"
+    names = sorted(p.name for p in album_dir.iterdir())
+    assert names == ["photo.jpg", "photo_folder.jpg"]
+    assert (album_dir / "photo.jpg").read_bytes() == b"aaa"
+    assert (album_dir / "photo_folder.jpg").read_bytes() == b"bbb"
+
+
 def _fake_text_event(user_id: str, text: str, reply_token: str = "reply-token"):
     return SimpleNamespace(
         source=SimpleNamespace(user_id=user_id),

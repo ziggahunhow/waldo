@@ -27,6 +27,9 @@ _log_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s:
 logging.getLogger().addHandler(_log_handler)
 logging.getLogger().setLevel(logging.INFO)
 
+ALBUMS_DIR = Path(__file__).parent / "albums"
+ALBUMS_DIR.mkdir(exist_ok=True)
+
 app = Flask(__name__)
 
 
@@ -204,10 +207,8 @@ def preview():
     return send_file(buf, mimetype="image/jpeg")
 
 
-@app.route("/api/image/<folder_id>/<filename>")
-def serve_image(folder_id, filename):
-    """Serve a cached image, converting HEIC → JPEG for browser compatibility."""
-    img_path = get_cache_dir(folder_id) / filename
+def _serve_image_file(img_path: Path):
+    """Serve an image file, converting HEIC → JPEG for browser compatibility."""
     if not img_path.exists():
         return "Not found", 404
 
@@ -224,6 +225,43 @@ def serve_image(folder_id, filename):
         return send_file(buf, mimetype="image/jpeg")
 
     return send_file(str(img_path))
+
+
+@app.route("/api/image/<folder_id>/<filename>")
+def serve_image(folder_id, filename):
+    return _serve_image_file(get_cache_dir(folder_id) / filename)
+
+
+@app.route("/album/<album_id>")
+def album_page(album_id):
+    album_dir = ALBUMS_DIR / album_id
+    if not album_dir.is_dir():
+        return "Album not found", 404
+
+    filenames = sorted(p.name for p in album_dir.iterdir() if p.is_file())
+    items = "\n".join(
+        f'<a href="/api/album/{album_id}/{name}" target="_blank">'
+        f'<img src="/api/album/{album_id}/{name}" loading="lazy"></a>'
+        for name in filenames
+    )
+    return f"""<!doctype html>
+<html><head><title>FaceFind album</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  body {{ background:#111; color:#eee; font-family:sans-serif; margin:0; padding:16px; }}
+  h1 {{ font-size:16px; font-weight:normal; opacity:0.7; }}
+  .grid {{ display:grid; grid-template-columns:repeat(auto-fill,minmax(180px,1fr)); gap:8px; }}
+  .grid img {{ width:100%; height:180px; object-fit:cover; border-radius:6px; }}
+</style></head>
+<body>
+  <h1>{len(filenames)} matched photo(s)</h1>
+  <div class="grid">{items}</div>
+</body></html>"""
+
+
+@app.route("/api/album/<album_id>/<filename>")
+def serve_album_image(album_id, filename):
+    return _serve_image_file(ALBUMS_DIR / album_id / filename)
 
 
 @app.route("/line/webhook", methods=["POST"])
