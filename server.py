@@ -1,11 +1,13 @@
 import io
 import json
+import logging
 import os
 import shutil
 import sys
 import tempfile
 import zipfile
 from datetime import datetime
+from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -17,6 +19,13 @@ sys.path.insert(0, str(Path(__file__).parent))
 from cache import get_cache_dir, list_cached_images
 from drive import download_images, extract_folder_id
 from recognizer import encode_references, is_match
+
+LOG_DIR = Path(__file__).parent / "logs"
+LOG_DIR.mkdir(exist_ok=True)
+_log_handler = TimedRotatingFileHandler(LOG_DIR / "server.log", when="midnight", backupCount=14)
+_log_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+logging.getLogger().addHandler(_log_handler)
+logging.getLogger().setLevel(logging.INFO)
 
 app = Flask(__name__)
 
@@ -224,11 +233,14 @@ def line_webhook():
 
     signature = request.headers.get("X-Line-Signature", "")
     body = request.get_data(as_text=True)
+    app.logger.info("LINE webhook hit: %d bytes body", len(body))
     try:
         _line_handler.handle(body, signature)
     except InvalidSignatureError:
+        app.logger.warning("LINE webhook: invalid signature")
         abort(400, "Invalid LINE signature")
     except Exception as e:
+        app.logger.exception("LINE webhook handler failed")
         abort(500, str(e))
     return "OK"
 

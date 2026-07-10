@@ -25,6 +25,7 @@ Setup
                               bot lists filenames only.
 """
 
+import logging
 import os
 import re
 import shutil
@@ -34,6 +35,8 @@ import time
 from pathlib import Path
 
 import requests
+
+logger = logging.getLogger(__name__)
 
 from linebot.v3 import WebhookHandler
 from linebot.v3.messaging import (
@@ -176,6 +179,7 @@ def _search_qr() -> QuickReply:
 def on_image(event: MessageEvent) -> None:
     user_id = event.source.user_id
     sess = _session(user_id)
+    logger.info("on_image user=%s state=%s", user_id, sess["state"])
 
     if sess["state"] == "searching":
         _reply(event.reply_token, [_txt("Search in progress — please wait.")])
@@ -210,6 +214,7 @@ def on_text(event: MessageEvent) -> None:  # noqa: C901  (state machine, complex
     sess = _session(user_id)
     low = text.lower()
     state = sess["state"]
+    logger.info("on_text user=%s state=%s text=%r", user_id, state, text)
 
     # ── Global commands ──────────────────────────────────────────────────────
     if low in ("reset", "/reset", "start", "/start"):
@@ -393,6 +398,10 @@ def _run_search(
     detector: str,
 ) -> None:
     public_url = os.environ.get("PUBLIC_URL", "").rstrip("/")
+    logger.info(
+        "search start user=%s urls=%d tolerance=%s detector=%s",
+        user_id, len(urls), tolerance, detector,
+    )
 
     try:
         known = encode_references(ref_paths, detector=detector)
@@ -408,6 +417,7 @@ def _run_search(
             try:
                 folder_id = extract_folder_id(url)
             except ValueError as e:
+                logger.warning("search user=%s invalid url=%s: %s", user_id, url, e)
                 _push(user_id, [_txt(f"⚠️ Skipping invalid URL: {e}")])
                 continue
 
@@ -419,6 +429,7 @@ def _run_search(
                 try:
                     download_images(url, cache_dir)
                 except Exception as e:
+                    logger.exception("search user=%s download failed url=%s", user_id, url)
                     _push(user_id, [_txt(f"⚠️ Download failed: {e}")])
                     continue
                 cached = list_cached_images(cache_dir)
@@ -446,6 +457,10 @@ def _run_search(
             )])
             return
 
+        logger.info(
+            "search done user=%s matches=%d scanned=%d",
+            user_id, len(matches), len(all_images),
+        )
         _push(user_id, [_txt(
             f"✅ Found {len(matches)} match(es) out of {len(all_images)} photos!"
         )])
@@ -472,6 +487,7 @@ def _run_search(
             )])
 
     except Exception as e:
+        logger.exception("search failed user=%s", user_id)
         _push(user_id, [_txt(f"❌ Search error: {e}")])
 
     finally:
