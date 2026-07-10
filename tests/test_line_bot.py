@@ -132,24 +132,26 @@ def _reply_text(mock_reply) -> str:
 
 @patch("line_bot.threading.Thread")
 @patch("line_bot._reply")
-def test_on_text_without_drive_links_replies_with_error(mock_reply, mock_thread):
+def test_on_text_without_drive_links_is_silently_ignored(mock_reply, mock_thread):
     line_bot.on_text(_fake_text_event("U1", "hello there, no links here"))
 
-    mock_reply.assert_called_once()
-    assert "找不到 Google Drive 連結" in _reply_text(mock_reply)
+    mock_reply.assert_not_called()
     mock_thread.assert_not_called()
 
 
 @patch("line_bot.threading.Thread")
 @patch("line_bot._reply")
 def test_on_text_with_drive_link_starts_search_thread(mock_reply, mock_thread):
+    line_bot._active_searches.clear()
     url = "https://drive.google.com/drive/folders/abc123"
     line_bot.on_text(_fake_text_event("U2", f"check this out {url}"))
 
     mock_reply.assert_called_once()
     mock_thread.assert_called_once()
     _, kwargs = mock_thread.call_args
-    assert kwargs["args"] == ("U2", [url])
+    assert kwargs["args"][0] == "U2"
+    assert kwargs["args"][1] == [url]
+    assert isinstance(kwargs["args"][2], line_bot.threading.Event)
     assert kwargs["daemon"] is True
     mock_thread.return_value.start.assert_called_once()
 
@@ -157,8 +159,76 @@ def test_on_text_with_drive_link_starts_search_thread(mock_reply, mock_thread):
 @patch("line_bot.threading.Thread")
 @patch("line_bot._reply")
 def test_on_text_dedupes_repeated_drive_links(mock_reply, mock_thread):
+    line_bot._active_searches.clear()
     url = "https://drive.google.com/drive/folders/abc123"
     line_bot.on_text(_fake_text_event("U3", f"{url} and again {url}"))
 
     _, kwargs = mock_thread.call_args
-    assert kwargs["args"] == ("U3", [url])
+    assert kwargs["args"][1] == [url]
+
+
+@patch("line_bot._reply")
+def test_on_text_help_command(mock_reply):
+    line_bot.on_text(_fake_text_event("U4", "/help"))
+
+    mock_reply.assert_called_once()
+    assert _reply_text(mock_reply) == line_bot._HELP_TEXT
+
+
+@patch("line_bot._reply")
+def test_on_text_stop_with_no_active_search(mock_reply):
+    line_bot._active_searches.clear()
+    line_bot.on_text(_fake_text_event("U5", "/stop"))
+
+    assert "沒有正在執行的搜尋" in _reply_text(mock_reply)
+
+
+@patch("line_bot._reply")
+def test_on_text_stop_signals_active_search(mock_reply):
+    user_id = "U6"
+    stop_event = line_bot.threading.Event()
+    line_bot._active_searches[user_id] = stop_event
+
+    try:
+        line_bot.on_text(_fake_text_event(user_id, "/stop"))
+
+        assert stop_event.is_set()
+        assert "正在停止搜尋" in _reply_text(mock_reply)
+    finally:
+        line_bot._active_searches.pop(user_id, None)
+
+
+@patch("line_bot.threading.Thread")
+@patch("line_bot._reply")
+def test_on_text_blocks_second_search_while_one_is_running(mock_reply, mock_thread):
+    user_id = "U7"
+    line_bot._active_searches[user_id] = line_bot.threading.Event()  # not yet set = running
+
+    try:
+        url = "https://drive.google.com/drive/folders/abc123"
+        line_bot.on_text(_fake_text_event(user_id, url))
+
+        assert "已有搜尋正在進行中" in _reply_text(mock_reply)
+        mock_thread.assert_not_called()
+    finally:
+        line_bot._active_searches.pop(user_id, None)
+
+
+@patch("line_bot._push")
+def test_run_search_serves_cached_album_without_recomputing(mock_push, tmp_path, monkeypatch):
+    monkeypatch.setattr(line_bot, "ALBUMS_DIR", tmp_path)
+    monkeypatch.setattr(line_bot, "encode_references", lambda *a, **k: (_ for _ in ()).throw(
+        AssertionError("should not recompute on a cache hit")
+    ))
+
+    urls = ["https://drive.google.com/drive/folders/cached"]
+    album_id = line_bot._album_id(urls)
+    album_dir = tmp_path / album_id
+    album_dir.mkdir()
+    (album_dir / "a.jpg").write_bytes(b"x")
+
+    line_bot._run_search("U8", urls, line_bot.threading.Event())
+
+    mock_push.assert_called_once()
+    _, messages = mock_push.call_args[0]
+    assert "先前搜尋過的快取結果" in messages[0].text

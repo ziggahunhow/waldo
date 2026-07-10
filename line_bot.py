@@ -2,12 +2,21 @@
 
 Flow
 ────
-  Any text message → extract Google Drive folder link(s) → download images
-  to cache → match against hardcoded reference photos → reply with matched
-  images, followed by a concluding "done" message (or an error message if
-  something fails along the way).
+  Commands: /help (show usage), /stop (cancel the caller's active search).
 
-  Non-text messages (photos, stickers, etc.) get no special handling.
+  Any other text message: extract Google Drive folder link(s) → download
+  images to cache → match against hardcoded reference photos → reply with
+  matched images, followed by a concluding "done" message (or an error
+  message if something fails along the way). A repeat search with the exact
+  same set of Drive URLs (an album already saved from a prior >10-match run)
+  is served straight from that cache instead of re-downloading/re-matching.
+  Only one search runs at a time per user; a second link while one is
+  already running gets an "already running" reply instead of starting a
+  second one.
+
+  Any message that isn't a command and contains no Drive link is ignored
+  silently. Non-text messages (photos, stickers, etc.) also get no special
+  handling.
 
 Setup
 ─────
@@ -67,6 +76,16 @@ _MAX_IMAGES_TO_SEND = 10
 
 ALBUMS_DIR = Path(__file__).parent / "albums"
 
+# One active search per user at a time — /stop signals the matching Event.
+_active_searches: dict[str, threading.Event] = {}
+
+_HELP_TEXT = (
+    "📖 可用指令：\n"
+    "/help — 顯示這個說明\n"
+    "/stop — 停止目前正在執行的搜尋\n\n"
+    "使用方式：直接傳送包含 Google Drive 資料夾連結的訊息，我就會開始搜尋符合的照片。"
+)
+
 
 def _reference_photo_paths() -> list[str]:
     if not _REF_DIR.exists():
@@ -95,6 +114,20 @@ def _save_album(album_id: str, matches: list[tuple[Path, str]]) -> None:
             name = f"{img_path.stem}_{folder_id[:6]}{img_path.suffix}"
         seen.add(name)
         shutil.copy2(img_path, album_dir / name)
+
+
+def _album_result_text(album_id: str, filenames: list[str], public_url: str) -> str:
+    if public_url:
+        return (
+            f"📁 找到 {len(filenames)} 張符合的照片，請點此查看：\n"
+            f"{public_url}/album/{album_id}"
+        )
+    names = "\n".join(f"• {n}" for n in filenames[:20])
+    extra = f"\n…還有 {len(filenames) - 20} 張" if len(filenames) > 20 else ""
+    return (
+        f"符合的檔案：\n{names}{extra}\n\n"
+        "提示：在 .env 中設定 PUBLIC_URL 即可以相簿形式查看。"
+    )
 
 
 # ── LINE API helpers ───────────────────────────────────────────────────────────
@@ -178,32 +211,63 @@ def on_text(event: MessageEvent) -> None:
     text = event.message.text.strip()
     logger.info("on_text user=%s text=%r", user_id, text)
 
-    urls = list(dict.fromkeys(_DRIVE_LINK_RE.findall(text)))
-    if not urls:
-        _reply(event.reply_token, [_txt(
-            "訊息中找不到 Google Drive 連結。\n"
-            "請傳送類似這樣的連結：https://drive.google.com/drive/folders/…"
-        )])
+    low = text.lower()
+
+    if low == "/help":
+        _reply(event.reply_token, [_txt(_HELP_TEXT)])
         return
 
+    if low == "/stop":
+        stop_event = _active_searches.get(user_id)
+        if stop_event is not None and not stop_event.is_set():
+            stop_event.set()
+            _reply(event.reply_token, [_txt("🛑 正在停止搜尋…")])
+        else:
+            _reply(event.reply_token, [_txt("目前沒有正在執行的搜尋。")])
+        return
+
+    urls = list(dict.fromkeys(_DRIVE_LINK_RE.findall(text)))
+    if not urls:
+        # Doesn't match any command or contain a Drive link — ignore silently.
+        return
+
+    existing = _active_searches.get(user_id)
+    if existing is not None and not existing.is_set():
+        _reply(event.reply_token, [_txt("⚠️ 已有搜尋正在進行中，請稍候或傳送 /stop 停止。")])
+        return
+
+    stop_event = threading.Event()
+    _active_searches[user_id] = stop_event
+
     _reply(event.reply_token, [_txt(
-        f"🔍 開始搜尋 {len(urls)} 個資料夾…\n完成後會通知你！"
+        f"🔍 開始搜尋 {len(urls)} 個資料夾…\n完成後會通知你！（傳送 /stop 可中止）"
     )])
 
     threading.Thread(
         target=_run_search,
-        args=(user_id, urls),
+        args=(user_id, urls, stop_event),
         daemon=True,
     ).start()
 
 
 # ── Background search ──────────────────────────────────────────────────────────
 
-def _run_search(user_id: str, urls: list[str]) -> None:
+def _run_search(user_id: str, urls: list[str], stop_event: threading.Event) -> None:
     public_url = os.environ.get("PUBLIC_URL", "").rstrip("/")
-    logger.info("search start user=%s urls=%d", user_id, len(urls))
+    album_id = _album_id(urls)
 
     try:
+        album_dir = ALBUMS_DIR / album_id
+        if album_dir.is_dir() and any(album_dir.iterdir()):
+            logger.info("search cache hit user=%s album_id=%s", user_id, album_id)
+            names = sorted(p.name for p in album_dir.iterdir() if p.is_file())
+            _push(user_id, [_txt(
+                _album_result_text(album_id, names, public_url) + "\n\n（先前搜尋過的快取結果）"
+            )])
+            return
+
+        logger.info("search start user=%s urls=%d album_id=%s", user_id, len(urls), album_id)
+
         ref_paths = _reference_photo_paths()
         if not ref_paths:
             _push(user_id, [_txt(f"❌ 在 {_REF_DIR} 找不到參考照片")])
@@ -216,6 +280,10 @@ def _run_search(user_id: str, urls: list[str]) -> None:
 
         all_images: list[tuple[Path, str]] = []
         for url in urls:
+            if stop_event.is_set():
+                _push(user_id, [_txt("🛑 搜尋已停止。")])
+                return
+
             try:
                 folder_id = extract_folder_id(url)
             except ValueError as e:
@@ -238,6 +306,10 @@ def _run_search(user_id: str, urls: list[str]) -> None:
 
             all_images.extend((img, folder_id) for img in cached)
 
+        if stop_event.is_set():
+            _push(user_id, [_txt("🛑 搜尋已停止。")])
+            return
+
         if not all_images:
             _push(user_id, [_txt("❌ 指定的資料夾中找不到圖片。")])
             return
@@ -246,6 +318,9 @@ def _run_search(user_id: str, urls: list[str]) -> None:
 
         matches: list[tuple[Path, str]] = []
         for img_path, folder_id in all_images:
+            if stop_event.is_set():
+                _push(user_id, [_txt(f"🛑 搜尋已停止（已找到 {len(matches)} 張符合的照片）。")])
+                return
             try:
                 if is_match(str(img_path), known, tolerance=_DEFAULT_TOLERANCE, detector=_DEFAULT_DETECTOR):
                     matches.append((img_path, folder_id))
@@ -253,20 +328,9 @@ def _run_search(user_id: str, urls: list[str]) -> None:
                 pass
 
         if len(matches) > _MAX_IMAGES_TO_SEND:
-            album_id = _album_id(urls)
             _save_album(album_id, matches)
-            if public_url:
-                _push(user_id, [_txt(
-                    f"📁 找到 {len(matches)} 張符合的照片，請點此查看：\n"
-                    f"{public_url}/album/{album_id}"
-                )])
-            else:
-                names = "\n".join(f"• {p.name}" for p, _ in matches[:20])
-                extra = f"\n…還有 {len(matches) - 20} 張" if len(matches) > 20 else ""
-                _push(user_id, [_txt(
-                    f"符合的檔案：\n{names}{extra}\n\n"
-                    "提示：在 .env 中設定 PUBLIC_URL 即可以相簿形式查看。"
-                )])
+            names = sorted(p.name for p in album_dir.iterdir() if p.is_file())
+            _push(user_id, [_txt(_album_result_text(album_id, names, public_url))])
         elif matches and public_url:
             for img_path, folder_id in matches:
                 img_url = f"{public_url}/api/image/{folder_id}/{img_path.name}"
@@ -292,3 +356,7 @@ def _run_search(user_id: str, urls: list[str]) -> None:
     except Exception as e:
         logger.exception("search failed user=%s", user_id)
         _push(user_id, [_txt(f"❌ 搜尋發生錯誤：{e}")])
+
+    finally:
+        if _active_searches.get(user_id) is stop_event:
+            _active_searches.pop(user_id, None)
