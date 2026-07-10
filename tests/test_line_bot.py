@@ -136,7 +136,7 @@ def test_on_text_without_drive_links_replies_with_error(mock_reply, mock_thread)
     line_bot.on_text(_fake_text_event("U1", "hello there, no links here"))
 
     mock_reply.assert_called_once()
-    assert "No Google Drive links found" in _reply_text(mock_reply)
+    assert "找不到 Google Drive 連結" in _reply_text(mock_reply)
     mock_thread.assert_not_called()
 
 

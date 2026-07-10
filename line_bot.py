@@ -181,13 +181,13 @@ def on_text(event: MessageEvent) -> None:
     urls = list(dict.fromkeys(_DRIVE_LINK_RE.findall(text)))
     if not urls:
         _reply(event.reply_token, [_txt(
-            "No Google Drive links found in your message.\n"
-            "Send a link like: https://drive.google.com/drive/folders/…"
+            "訊息中找不到 Google Drive 連結。\n"
+            "請傳送類似這樣的連結：https://drive.google.com/drive/folders/…"
         )])
         return
 
     _reply(event.reply_token, [_txt(
-        f"🔍 Starting search across {len(urls)} folder(s)…\nI'll message you when done!"
+        f"🔍 開始搜尋 {len(urls)} 個資料夾…\n完成後會通知你！"
     )])
 
     threading.Thread(
@@ -206,12 +206,12 @@ def _run_search(user_id: str, urls: list[str]) -> None:
     try:
         ref_paths = _reference_photo_paths()
         if not ref_paths:
-            _push(user_id, [_txt(f"❌ No reference photos found in {_REF_DIR}")])
+            _push(user_id, [_txt(f"❌ 在 {_REF_DIR} 找不到參考照片")])
             return
 
         known = encode_references(ref_paths, detector=_DEFAULT_DETECTOR)
         if not known:
-            _push(user_id, [_txt("⚠️ No faces detected in the reference photos.")])
+            _push(user_id, [_txt("⚠️ 參考照片中偵測不到人臉。")])
             return
 
         all_images: list[tuple[Path, str]] = []
@@ -220,29 +220,29 @@ def _run_search(user_id: str, urls: list[str]) -> None:
                 folder_id = extract_folder_id(url)
             except ValueError as e:
                 logger.warning("search user=%s invalid url=%s: %s", user_id, url, e)
-                _push(user_id, [_txt(f"⚠️ Skipping invalid URL: {e}")])
+                _push(user_id, [_txt(f"⚠️ 略過無效連結：{e}")])
                 continue
 
             cache_dir = get_cache_dir(folder_id)
             cached = list_cached_images(cache_dir)
 
             if not cached:
-                _push(user_id, [_txt("⬇️ Downloading folder… this may take a moment.")])
+                _push(user_id, [_txt("⬇️ 正在下載資料夾…請稍候。")])
                 try:
                     download_images(url, cache_dir)
                 except Exception as e:
                     logger.exception("search user=%s download failed url=%s", user_id, url)
-                    _push(user_id, [_txt(f"⚠️ Download failed: {e}")])
+                    _push(user_id, [_txt(f"⚠️ 下載失敗：{e}")])
                     continue
                 cached = list_cached_images(cache_dir)
 
             all_images.extend((img, folder_id) for img in cached)
 
         if not all_images:
-            _push(user_id, [_txt("❌ No images found in the specified folder(s).")])
+            _push(user_id, [_txt("❌ 指定的資料夾中找不到圖片。")])
             return
 
-        _push(user_id, [_txt(f"🔎 Scanning {len(all_images)} image(s)…")])
+        _push(user_id, [_txt(f"🔎 正在掃描 {len(all_images)} 張圖片…")])
 
         matches: list[tuple[Path, str]] = []
         for img_path, folder_id in all_images:
@@ -257,15 +257,15 @@ def _run_search(user_id: str, urls: list[str]) -> None:
             _save_album(album_id, matches)
             if public_url:
                 _push(user_id, [_txt(
-                    f"📁 {len(matches)} matches — view them here:\n"
+                    f"📁 找到 {len(matches)} 張符合的照片，請點此查看：\n"
                     f"{public_url}/album/{album_id}"
                 )])
             else:
                 names = "\n".join(f"• {p.name}" for p, _ in matches[:20])
-                extra = f"\n…and {len(matches) - 20} more" if len(matches) > 20 else ""
+                extra = f"\n…還有 {len(matches) - 20} 張" if len(matches) > 20 else ""
                 _push(user_id, [_txt(
-                    f"Matched files:\n{names}{extra}\n\n"
-                    "Tip: set PUBLIC_URL in .env to view them as an album."
+                    f"符合的檔案：\n{names}{extra}\n\n"
+                    "提示：在 .env 中設定 PUBLIC_URL 即可以相簿形式查看。"
                 )])
         elif matches and public_url:
             for img_path, folder_id in matches:
@@ -277,8 +277,8 @@ def _run_search(user_id: str, urls: list[str]) -> None:
         elif matches:
             names = "\n".join(f"• {p.name}" for p, _ in matches)
             _push(user_id, [_txt(
-                f"Matched files:\n{names}\n\n"
-                "Tip: set PUBLIC_URL in .env to receive images directly in chat."
+                f"符合的檔案：\n{names}\n\n"
+                "提示：在 .env 中設定 PUBLIC_URL 即可直接在聊天室收到圖片。"
             )])
 
         logger.info(
@@ -286,9 +286,9 @@ def _run_search(user_id: str, urls: list[str]) -> None:
             user_id, len(matches), len(all_images),
         )
         _push(user_id, [_txt(
-            f"✅ Done — found {len(matches)} match(es) out of {len(all_images)} photo(s)."
+            f"✅ 完成 — 在 {len(all_images)} 張照片中找到 {len(matches)} 張符合的照片。"
         )])
 
     except Exception as e:
         logger.exception("search failed user=%s", user_id)
-        _push(user_id, [_txt(f"❌ Search error: {e}")])
+        _push(user_id, [_txt(f"❌ 搜尋發生錯誤：{e}")])
