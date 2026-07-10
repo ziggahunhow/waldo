@@ -253,7 +253,7 @@ def album_page(album_id):
     items = "\n".join(
         f'<div class="item" data-name="{name}">'
         f'<img src="/api/album/{album_id}/{name}" loading="lazy">'
-        f'<input type="checkbox" class="sel">'
+        f'<button class="sel" title="Select photo">✓</button>'
         f'</div>'
         for name in filenames
     )
@@ -267,7 +267,13 @@ def album_page(album_id):
   .item {{ position:relative; border-radius:6px; overflow:hidden; }}
   .item img {{ display:block; width:100%; height:180px; object-fit:cover; cursor:pointer; }}
   .item.selected img {{ outline:3px solid #4caf50; outline-offset:-3px; }}
-  .item .sel {{ position:absolute; top:8px; left:8px; width:22px; height:22px; }}
+  .item .sel {{
+    position:absolute; top:6px; right:6px; width:22px; height:22px;
+    background:rgba(0,0,0,0.4); border:1px solid rgba(255,255,255,0.35); border-radius:5px;
+    color:transparent; font-size:0.7rem; font-weight:700;
+    display:flex; align-items:center; justify-content:center; cursor:pointer; padding:0;
+  }}
+  .item.selected .sel {{ background:#4caf50; border-color:#4caf50; color:#111; }}
   .bar {{
     position:fixed; left:0; right:0; bottom:0; padding:12px 16px;
     background:#1c1c1c; border-top:1px solid #333;
@@ -292,14 +298,19 @@ def album_page(album_id):
   </div>
 
   <script>
+    const albumId = {album_id!r};
     const grid = document.getElementById('grid');
     const countEl = document.getElementById('count');
     const dlBtn = document.getElementById('dl');
     const selected = new Set();
 
+    // Prefer the native share sheet on phones (Save to Photos/Files) over a
+    // zip, which most mobile browsers can't usefully "open" on download.
+    const canShareFiles = !!(navigator.canShare && navigator.share);
+    dlBtn.textContent = canShareFiles ? '📤 share photos' : '↓ download zip';
+
     function setSelected(item, on) {{
       const name = item.dataset.name;
-      item.querySelector('.sel').checked = on;
       item.classList.toggle('selected', on);
       if (on) selected.add(name); else selected.delete(name);
       countEl.textContent = selected.size === 0 ? '0 selected' : `${{selected.size}} selected`;
@@ -309,7 +320,7 @@ def album_page(album_id):
     grid.querySelectorAll('.item').forEach(item => {{
       item.querySelector('.sel').addEventListener('click', e => {{
         e.stopPropagation();
-        setSelected(item, e.target.checked);
+        setSelected(item, !item.classList.contains('selected'));
       }});
       item.querySelector('img').addEventListener('click', () => {{
         setSelected(item, !item.classList.contains('selected'));
@@ -323,27 +334,46 @@ def album_page(album_id):
       grid.querySelectorAll('.item').forEach(item => setSelected(item, false));
     }});
 
+    async function shareSelected() {{
+      const files = await Promise.all([...selected].map(async name => {{
+        const res = await fetch(`/api/album/${{albumId}}/${{encodeURIComponent(name)}}`);
+        const blob = await res.blob();
+        return new File([blob], name, {{ type: blob.type }});
+      }}));
+      if (!navigator.canShare({{ files }})) throw new Error('sharing not supported for these files');
+      await navigator.share({{ files }});
+    }}
+
+    async function downloadZip() {{
+      const res = await fetch(`/api/album/${{albumId}}/download`, {{
+        method: 'POST',
+        headers: {{ 'Content-Type': 'application/json' }},
+        body: JSON.stringify({{ filenames: [...selected] }}),
+      }});
+      if (!res.ok) throw new Error('server error');
+      const blob = await res.blob();
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = 'facefind_album.zip';
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+    }}
+
     dlBtn.addEventListener('click', async () => {{
       dlBtn.disabled = true;
-      dlBtn.textContent = 'zipping…';
+      const original = dlBtn.textContent;
+      dlBtn.textContent = canShareFiles ? 'preparing…' : 'zipping…';
       try {{
-        const res = await fetch('/api/album/{album_id}/download', {{
-          method: 'POST',
-          headers: {{ 'Content-Type': 'application/json' }},
-          body: JSON.stringify({{ filenames: [...selected] }}),
-        }});
-        if (!res.ok) throw new Error('server error');
-        const blob = await res.blob();
-        const a = document.createElement('a');
-        a.href = URL.createObjectURL(blob);
-        a.download = 'facefind_album.zip';
-        a.click();
-        setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+        if (canShareFiles) {{
+          await shareSelected();
+        }} else {{
+          await downloadZip();
+        }}
       }} catch (e) {{
-        alert('Download failed: ' + e.message);
+        if (e.name !== 'AbortError') alert('Download failed: ' + e.message);
       }} finally {{
         dlBtn.disabled = selected.size === 0;
-        dlBtn.textContent = '↓ download zip';
+        dlBtn.textContent = original;
       }}
     }});
   </script>
