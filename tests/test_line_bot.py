@@ -1,8 +1,8 @@
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import line_bot
-from line_bot import _PASTE_TEXT_PROMPT, _REF_PHOTO_PROMPT, _SEARCHING_MSG, on_postback
 
 
 def _reset_token_cache():
@@ -63,11 +63,29 @@ def test_access_token_raises_when_credentials_missing(mock_requests):
     mock_requests.post.assert_not_called()
 
 
-def _fake_event(user_id: str, data: str, reply_token: str = "reply-token"):
+def test_reference_photo_paths_filters_hidden_files_and_dirs(tmp_path, monkeypatch):
+    (tmp_path / "a.jpg").write_bytes(b"x")
+    (tmp_path / "b.jpg").write_bytes(b"x")
+    (tmp_path / ".DS_Store").write_bytes(b"x")
+    (tmp_path / "subdir").mkdir()
+    monkeypatch.setattr(line_bot, "_REF_DIR", tmp_path)
+
+    paths = line_bot._reference_photo_paths()
+
+    assert sorted(Path(p).name for p in paths) == ["a.jpg", "b.jpg"]
+
+
+def test_reference_photo_paths_missing_dir_returns_empty(tmp_path, monkeypatch):
+    monkeypatch.setattr(line_bot, "_REF_DIR", tmp_path / "does-not-exist")
+
+    assert line_bot._reference_photo_paths() == []
+
+
+def _fake_text_event(user_id: str, text: str, reply_token: str = "reply-token"):
     return SimpleNamespace(
         source=SimpleNamespace(user_id=user_id),
         reply_token=reply_token,
-        postback=SimpleNamespace(data=data),
+        message=SimpleNamespace(text=text),
     )
 
 
@@ -77,100 +95,35 @@ def _reply_text(mock_reply) -> str:
     return messages[0].text
 
 
+@patch("line_bot.threading.Thread")
 @patch("line_bot._reply")
-def test_change_ref_clears_existing_refs_and_prompts(mock_reply):
-    user_id = "U_change_ref_1"
-    sess = line_bot._session(user_id)
-    sess["ref_paths"] = ["old1.jpg", "old2.jpg"]
-    sess["state"] = "collecting_refs"
+def test_on_text_without_drive_links_replies_with_error(mock_reply, mock_thread):
+    line_bot.on_text(_fake_text_event("U1", "hello there, no links here"))
 
-    try:
-        on_postback(_fake_event(user_id, "action=change_ref"))
-
-        assert sess["ref_paths"] == []
-        assert sess["state"] == "idle"
-        mock_reply.assert_called_once()
-        assert _reply_text(mock_reply) == _REF_PHOTO_PROMPT
-    finally:
-        line_bot._reset_session(user_id)
+    mock_reply.assert_called_once()
+    assert "No Google Drive links found" in _reply_text(mock_reply)
+    mock_thread.assert_not_called()
 
 
+@patch("line_bot.threading.Thread")
 @patch("line_bot._reply")
-def test_change_ref_blocked_while_searching(mock_reply):
-    user_id = "U_change_ref_2"
-    sess = line_bot._session(user_id)
-    sess["ref_paths"] = ["old1.jpg"]
-    sess["state"] = "searching"
+def test_on_text_with_drive_link_starts_search_thread(mock_reply, mock_thread):
+    url = "https://drive.google.com/drive/folders/abc123"
+    line_bot.on_text(_fake_text_event("U2", f"check this out {url}"))
 
-    try:
-        on_postback(_fake_event(user_id, "action=change_ref"))
-
-        assert sess["ref_paths"] == ["old1.jpg"]
-        assert sess["state"] == "searching"
-        assert _reply_text(mock_reply) == _SEARCHING_MSG
-    finally:
-        line_bot._reset_session(user_id)
+    mock_reply.assert_called_once()
+    mock_thread.assert_called_once()
+    _, kwargs = mock_thread.call_args
+    assert kwargs["args"] == ("U2", [url])
+    assert kwargs["daemon"] is True
+    mock_thread.return_value.start.assert_called_once()
 
 
+@patch("line_bot.threading.Thread")
 @patch("line_bot._reply")
-def test_paste_text_without_refs_prompts_for_photos(mock_reply):
-    user_id = "U_paste_1"
-    sess = line_bot._session(user_id)
-    assert sess["ref_paths"] == []
+def test_on_text_dedupes_repeated_drive_links(mock_reply, mock_thread):
+    url = "https://drive.google.com/drive/folders/abc123"
+    line_bot.on_text(_fake_text_event("U3", f"{url} and again {url}"))
 
-    try:
-        on_postback(_fake_event(user_id, "action=paste_text"))
-
-        assert sess["state"] == "idle"
-        assert _reply_text(mock_reply) == _REF_PHOTO_PROMPT
-    finally:
-        line_bot._reset_session(user_id)
-
-
-@patch("line_bot._reply")
-def test_paste_text_with_refs_sets_awaiting_url(mock_reply):
-    user_id = "U_paste_2"
-    sess = line_bot._session(user_id)
-    sess["ref_paths"] = ["ref1.jpg"]
-    sess["state"] = "collecting_refs"
-
-    try:
-        on_postback(_fake_event(user_id, "action=paste_text"))
-
-        assert sess["state"] == "awaiting_url"
-        assert _reply_text(mock_reply) == _PASTE_TEXT_PROMPT
-    finally:
-        line_bot._reset_session(user_id)
-
-
-@patch("line_bot._reply")
-def test_paste_text_blocked_while_searching(mock_reply):
-    user_id = "U_paste_3"
-    sess = line_bot._session(user_id)
-    sess["ref_paths"] = ["ref1.jpg"]
-    sess["state"] = "searching"
-
-    try:
-        on_postback(_fake_event(user_id, "action=paste_text"))
-
-        assert sess["state"] == "searching"
-        assert _reply_text(mock_reply) == _SEARCHING_MSG
-    finally:
-        line_bot._reset_session(user_id)
-
-
-@patch("line_bot._reply")
-def test_unrecognized_postback_data_is_ignored(mock_reply):
-    user_id = "U_unknown_1"
-    sess = line_bot._session(user_id)
-    sess["ref_paths"] = ["ref1.jpg"]
-    sess["state"] = "collecting_refs"
-
-    try:
-        on_postback(_fake_event(user_id, "action=unknown"))
-
-        mock_reply.assert_not_called()
-        assert sess["state"] == "collecting_refs"
-        assert sess["ref_paths"] == ["ref1.jpg"]
-    finally:
-        line_bot._reset_session(user_id)
+    _, kwargs = mock_thread.call_args
+    assert kwargs["args"] == ("U3", [url])
