@@ -62,7 +62,7 @@ def search():
                     folder_id = extract_folder_id(url)
                 except ValueError as e:
                     yield sse({"type": "error", "msg": str(e)})
-                    return
+                    continue
 
                 cache_dir = get_cache_dir(folder_id)
                 cached = list_cached_images(cache_dir)
@@ -74,8 +74,9 @@ def search():
                     try:
                         download_images(url, cache_dir)
                     except Exception as e:
+                        app.logger.exception(f"Download failed ({label}): {url}")
                         yield sse({"type": "error", "msg": f"Download failed ({label}): {e}"})
-                        return
+                        continue
                     cached = list_cached_images(cache_dir)
 
                 all_images.extend((img, folder_id) for img in cached)
@@ -113,6 +114,7 @@ def search():
             yield sse({"type": "done", "output_dir": str(out_path)})
 
         except Exception as e:
+            app.logger.exception("Search failed")
             yield sse({"type": "error", "msg": str(e)})
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
@@ -232,4 +234,4 @@ def line_webhook():
 
 
 if __name__ == "__main__":
-    app.run(debug=True, port=5001)
+    app.run(debug=True, port=5565)
