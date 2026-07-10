@@ -118,7 +118,7 @@ def test_save_album_copies_files_and_dedupes_names(tmp_path, monkeypatch):
 
 def _fake_text_event(user_id: str, text: str, reply_token: str = "reply-token"):
     return SimpleNamespace(
-        source=SimpleNamespace(user_id=user_id),
+        source=SimpleNamespace(type="user", user_id=user_id),
         reply_token=reply_token,
         message=SimpleNamespace(text=text),
     )
@@ -128,6 +128,40 @@ def _reply_text(mock_reply) -> str:
     """Text of the single TextMessage passed to the last _reply() call."""
     _, messages = mock_reply.call_args[0]
     return messages[0].text
+
+
+def test_push_target_uses_user_id_for_1to1_chat():
+    source = SimpleNamespace(type="user", user_id="U123")
+    assert line_bot._push_target(source) == "U123"
+
+
+def test_push_target_uses_group_id_for_group_chat():
+    source = SimpleNamespace(type="group", group_id="G123", user_id="U123")
+    assert line_bot._push_target(source) == "G123"
+
+
+def test_push_target_uses_room_id_for_multi_person_room():
+    source = SimpleNamespace(type="room", room_id="R123", user_id="U123")
+    assert line_bot._push_target(source) == "R123"
+
+
+@patch("line_bot.threading.Thread")
+@patch("line_bot._reply")
+def test_on_text_in_group_pushes_results_to_group_not_sender(mock_reply, mock_thread):
+    group_id = "G_search_1"
+    line_bot._active_searches.pop(group_id, None)
+    event = SimpleNamespace(
+        source=SimpleNamespace(type="group", group_id=group_id, user_id="U_sender"),
+        reply_token="reply-token",
+        message=SimpleNamespace(text="https://drive.google.com/drive/folders/abc123"),
+    )
+
+    line_bot.on_text(event)
+
+    _, kwargs = mock_thread.call_args
+    assert kwargs["args"][0] == group_id
+    assert group_id in line_bot._active_searches
+    line_bot._active_searches.pop(group_id, None)
 
 
 @patch("line_bot.threading.Thread")

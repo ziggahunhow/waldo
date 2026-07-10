@@ -192,10 +192,10 @@ def _reply(reply_token: str, messages: list) -> None:
         )
 
 
-def _push(user_id: str, messages: list) -> None:
+def _push(target_id: str, messages: list) -> None:
     with ApiClient(_cfg()) as client:
         MessagingApi(client).push_message(
-            PushMessageRequest(to=user_id, messages=messages)
+            PushMessageRequest(to=target_id, messages=messages)
         )
 
 
@@ -203,13 +203,25 @@ def _txt(text: str) -> TextMessage:
     return TextMessage(text=text)
 
 
+def _push_target(source) -> str:
+    """Where push_message should send follow-up messages for this event's
+    source. A user's own id only reaches their 1:1 chat with the bot — in a
+    group or multi-person room, replies must target the group/room id
+    instead, or push_message silently DMs the sender."""
+    if source.type == "group":
+        return source.group_id
+    if source.type == "room":
+        return source.room_id
+    return source.user_id
+
+
 # ── Text handler ───────────────────────────────────────────────────────────────
 
 @handler.add(MessageEvent, message=TextMessageContent)
 def on_text(event: MessageEvent) -> None:
-    user_id = event.source.user_id
+    target_id = _push_target(event.source)
     text = event.message.text.strip()
-    logger.info("on_text user=%s text=%r", user_id, text)
+    logger.info("on_text target=%s text=%r", target_id, text)
 
     low = text.lower()
 
@@ -218,7 +230,7 @@ def on_text(event: MessageEvent) -> None:
         return
 
     if low == "/stop":
-        stop_event = _active_searches.get(user_id)
+        stop_event = _active_searches.get(target_id)
         if stop_event is not None and not stop_event.is_set():
             stop_event.set()
             _reply(event.reply_token, [_txt("🛑 正在停止搜尋…")])
@@ -231,13 +243,13 @@ def on_text(event: MessageEvent) -> None:
         # Doesn't match any command or contain a Drive link — ignore silently.
         return
 
-    existing = _active_searches.get(user_id)
+    existing = _active_searches.get(target_id)
     if existing is not None and not existing.is_set():
         _reply(event.reply_token, [_txt("⚠️ 已有搜尋正在進行中，請稍候或傳送 /stop 停止。")])
         return
 
     stop_event = threading.Event()
-    _active_searches[user_id] = stop_event
+    _active_searches[target_id] = stop_event
 
     _reply(event.reply_token, [_txt(
         f"🔍 開始搜尋 {len(urls)} 個資料夾…\n完成後會通知你！（傳送 /stop 可中止）"
@@ -245,81 +257,81 @@ def on_text(event: MessageEvent) -> None:
 
     threading.Thread(
         target=_run_search,
-        args=(user_id, urls, stop_event),
+        args=(target_id, urls, stop_event),
         daemon=True,
     ).start()
 
 
 # ── Background search ──────────────────────────────────────────────────────────
 
-def _run_search(user_id: str, urls: list[str], stop_event: threading.Event) -> None:
+def _run_search(target_id: str, urls: list[str], stop_event: threading.Event) -> None:
     public_url = os.environ.get("PUBLIC_URL", "").rstrip("/")
     album_id = _album_id(urls)
 
     try:
         album_dir = ALBUMS_DIR / album_id
         if album_dir.is_dir() and any(album_dir.iterdir()):
-            logger.info("search cache hit user=%s album_id=%s", user_id, album_id)
+            logger.info("search cache hit target=%s album_id=%s", target_id, album_id)
             names = sorted(p.name for p in album_dir.iterdir() if p.is_file())
-            _push(user_id, [_txt(
+            _push(target_id, [_txt(
                 _album_result_text(album_id, names, public_url) + "\n\n（先前搜尋過的快取結果）"
             )])
             return
 
-        logger.info("search start user=%s urls=%d album_id=%s", user_id, len(urls), album_id)
+        logger.info("search start target=%s urls=%d album_id=%s", target_id, len(urls), album_id)
 
         ref_paths = _reference_photo_paths()
         if not ref_paths:
-            _push(user_id, [_txt(f"❌ 在 {_REF_DIR} 找不到參考照片")])
+            _push(target_id, [_txt(f"❌ 在 {_REF_DIR} 找不到參考照片")])
             return
 
         known = encode_references(ref_paths, detector=_DEFAULT_DETECTOR)
         if not known:
-            _push(user_id, [_txt("⚠️ 參考照片中偵測不到人臉。")])
+            _push(target_id, [_txt("⚠️ 參考照片中偵測不到人臉。")])
             return
 
         all_images: list[tuple[Path, str]] = []
         for url in urls:
             if stop_event.is_set():
-                _push(user_id, [_txt("🛑 搜尋已停止。")])
+                _push(target_id, [_txt("🛑 搜尋已停止。")])
                 return
 
             try:
                 folder_id = extract_folder_id(url)
             except ValueError as e:
-                logger.warning("search user=%s invalid url=%s: %s", user_id, url, e)
-                _push(user_id, [_txt(f"⚠️ 略過無效連結：{e}")])
+                logger.warning("search target=%s invalid url=%s: %s", target_id, url, e)
+                _push(target_id, [_txt(f"⚠️ 略過無效連結：{e}")])
                 continue
 
             cache_dir = get_cache_dir(folder_id)
             cached = list_cached_images(cache_dir)
 
             if not cached:
-                _push(user_id, [_txt("⬇️ 正在下載資料夾…請稍候。")])
+                _push(target_id, [_txt("⬇️ 正在下載資料夾…請稍候。")])
                 try:
                     download_images(url, cache_dir)
                 except Exception as e:
-                    logger.exception("search user=%s download failed url=%s", user_id, url)
-                    _push(user_id, [_txt(f"⚠️ 下載失敗：{e}")])
+                    logger.exception("search target=%s download failed url=%s", target_id, url)
+                    _push(target_id, [_txt(f"⚠️ 下載失敗：{e}")])
                     continue
                 cached = list_cached_images(cache_dir)
 
             all_images.extend((img, folder_id) for img in cached)
 
         if stop_event.is_set():
-            _push(user_id, [_txt("🛑 搜尋已停止。")])
+            _push(target_id, [_txt("🛑 搜尋已停止。")])
             return
 
         if not all_images:
-            _push(user_id, [_txt("❌ 指定的資料夾中找不到圖片。")])
+            _push(target_id, [_txt("❌ 指定的資料夾中找不到圖片。")])
             return
 
-        _push(user_id, [_txt(f"🔎 正在掃描 {len(all_images)} 張圖片…")])
+        _push(target_id, [_txt(f"🔎 正在掃描 {len(all_images)} 張圖片…")])
 
         matches: list[tuple[Path, str]] = []
         for img_path, folder_id in all_images:
             if stop_event.is_set():
-                _push(user_id, [_txt(f"🛑 搜尋已停止（已找到 {len(matches)} 張符合的照片）。")])
+                _push(target_id, [_txt(f"🛑 搜尋已停止（已找到 {len(matches)} 張符合的照片）。")])
                 return
             try:
                 if is_match(str(img_path), known, tolerance=_DEFAULT_TOLERANCE, detector=_DEFAULT_DETECTOR):
@@ -330,33 +342,33 @@ def _run_search(user_id: str, urls: list[str], stop_event: threading.Event) -> N
         if len(matches) > _MAX_IMAGES_TO_SEND:
             _save_album(album_id, matches)
             names = sorted(p.name for p in album_dir.iterdir() if p.is_file())
-            _push(user_id, [_txt(_album_result_text(album_id, names, public_url))])
+            _push(target_id, [_txt(_album_result_text(album_id, names, public_url))])
         elif matches and public_url:
             for img_path, folder_id in matches:
                 img_url = f"{public_url}/api/image/{folder_id}/{img_path.name}"
-                _push(user_id, [ImageMessage(
+                _push(target_id, [ImageMessage(
                     original_content_url=img_url,
                     preview_image_url=img_url,
                 )])
         elif matches:
             names = "\n".join(f"• {p.name}" for p, _ in matches)
-            _push(user_id, [_txt(
+            _push(target_id, [_txt(
                 f"符合的檔案：\n{names}\n\n"
                 "提示：在 .env 中設定 PUBLIC_URL 即可直接在聊天室收到圖片。"
             )])
 
         logger.info(
-            "search done user=%s matches=%d scanned=%d",
-            user_id, len(matches), len(all_images),
+            "search done target=%s matches=%d scanned=%d",
+            target_id, len(matches), len(all_images),
         )
-        _push(user_id, [_txt(
+        _push(target_id, [_txt(
             f"✅ 完成 — 在 {len(all_images)} 張照片中找到 {len(matches)} 張符合的照片。"
         )])
 
     except Exception as e:
-        logger.exception("search failed user=%s", user_id)
-        _push(user_id, [_txt(f"❌ 搜尋發生錯誤：{e}")])
+        logger.exception("search failed target=%s", target_id)
+        _push(target_id, [_txt(f"❌ 搜尋發生錯誤：{e}")])
 
     finally:
-        if _active_searches.get(user_id) is stop_event:
-            _active_searches.pop(user_id, None)
+        if _active_searches.get(target_id) is stop_event:
+            _active_searches.pop(target_id, None)
