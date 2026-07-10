@@ -9,6 +9,7 @@ import zipfile
 from datetime import datetime
 from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
+from typing import Optional
 
 from dotenv import load_dotenv
 from flask import Flask, Response, abort, request, send_file, stream_with_context
@@ -207,9 +208,19 @@ def preview():
     return send_file(buf, mimetype="image/jpeg")
 
 
+def _safe_child(parent_dir: Path, name: str) -> Optional[Path]:
+    """Resolve `name` as a direct child of parent_dir, rejecting any path
+    traversal (e.g. "..", "../../server.py"). Returns None if unsafe."""
+    resolved_parent = parent_dir.resolve()
+    candidate = (resolved_parent / name).resolve()
+    if candidate.parent != resolved_parent:
+        return None
+    return candidate
+
+
 def _serve_image_file(img_path: Path):
     """Serve an image file, converting HEIC → JPEG for browser compatibility."""
-    if not img_path.exists():
+    if img_path is None or not img_path.exists():
         return "Not found", 404
 
     if img_path.suffix.lower() in {".heic", ".heif"}:
@@ -229,39 +240,144 @@ def _serve_image_file(img_path: Path):
 
 @app.route("/api/image/<folder_id>/<filename>")
 def serve_image(folder_id, filename):
-    return _serve_image_file(get_cache_dir(folder_id) / filename)
+    return _serve_image_file(_safe_child(get_cache_dir(folder_id), filename))
 
 
 @app.route("/album/<album_id>")
 def album_page(album_id):
-    album_dir = ALBUMS_DIR / album_id
-    if not album_dir.is_dir():
+    album_dir = _safe_child(ALBUMS_DIR, album_id)
+    if album_dir is None or not album_dir.is_dir():
         return "Album not found", 404
 
     filenames = sorted(p.name for p in album_dir.iterdir() if p.is_file())
     items = "\n".join(
-        f'<a href="/api/album/{album_id}/{name}" target="_blank">'
-        f'<img src="/api/album/{album_id}/{name}" loading="lazy"></a>'
+        f'<div class="item" data-name="{name}">'
+        f'<img src="/api/album/{album_id}/{name}" loading="lazy">'
+        f'<input type="checkbox" class="sel">'
+        f'</div>'
         for name in filenames
     )
     return f"""<!doctype html>
 <html><head><title>FaceFind album</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
-  body {{ background:#111; color:#eee; font-family:sans-serif; margin:0; padding:16px; }}
+  body {{ background:#111; color:#eee; font-family:sans-serif; margin:0; padding:16px 16px 80px; }}
   h1 {{ font-size:16px; font-weight:normal; opacity:0.7; }}
   .grid {{ display:grid; grid-template-columns:repeat(auto-fill,minmax(180px,1fr)); gap:8px; }}
-  .grid img {{ width:100%; height:180px; object-fit:cover; border-radius:6px; }}
+  .item {{ position:relative; border-radius:6px; overflow:hidden; }}
+  .item img {{ display:block; width:100%; height:180px; object-fit:cover; cursor:pointer; }}
+  .item.selected img {{ outline:3px solid #4caf50; outline-offset:-3px; }}
+  .item .sel {{ position:absolute; top:8px; left:8px; width:22px; height:22px; }}
+  .bar {{
+    position:fixed; left:0; right:0; bottom:0; padding:12px 16px;
+    background:#1c1c1c; border-top:1px solid #333;
+    display:flex; align-items:center; gap:12px; flex-wrap:wrap;
+  }}
+  .bar button {{
+    background:#2a2a2a; color:#eee; border:1px solid #444; border-radius:6px;
+    padding:8px 14px; cursor:pointer; font-size:14px;
+  }}
+  .bar button:disabled {{ opacity:0.4; cursor:default; }}
+  .bar .count {{ opacity:0.7; font-size:13px; margin-right:auto; }}
 </style></head>
 <body>
   <h1>{len(filenames)} matched photo(s)</h1>
-  <div class="grid">{items}</div>
+  <div class="grid" id="grid">{items}</div>
+
+  <div class="bar">
+    <span class="count" id="count">0 selected</span>
+    <button id="sel-all">select all</button>
+    <button id="sel-none">select none</button>
+    <button id="dl" disabled>↓ download zip</button>
+  </div>
+
+  <script>
+    const grid = document.getElementById('grid');
+    const countEl = document.getElementById('count');
+    const dlBtn = document.getElementById('dl');
+    const selected = new Set();
+
+    function setSelected(item, on) {{
+      const name = item.dataset.name;
+      item.querySelector('.sel').checked = on;
+      item.classList.toggle('selected', on);
+      if (on) selected.add(name); else selected.delete(name);
+      countEl.textContent = selected.size === 0 ? '0 selected' : `${{selected.size}} selected`;
+      dlBtn.disabled = selected.size === 0;
+    }}
+
+    grid.querySelectorAll('.item').forEach(item => {{
+      item.querySelector('.sel').addEventListener('click', e => {{
+        e.stopPropagation();
+        setSelected(item, e.target.checked);
+      }});
+      item.querySelector('img').addEventListener('click', () => {{
+        setSelected(item, !item.classList.contains('selected'));
+      }});
+    }});
+
+    document.getElementById('sel-all').addEventListener('click', () => {{
+      grid.querySelectorAll('.item').forEach(item => setSelected(item, true));
+    }});
+    document.getElementById('sel-none').addEventListener('click', () => {{
+      grid.querySelectorAll('.item').forEach(item => setSelected(item, false));
+    }});
+
+    dlBtn.addEventListener('click', async () => {{
+      dlBtn.disabled = true;
+      dlBtn.textContent = 'zipping…';
+      try {{
+        const res = await fetch('/api/album/{album_id}/download', {{
+          method: 'POST',
+          headers: {{ 'Content-Type': 'application/json' }},
+          body: JSON.stringify({{ filenames: [...selected] }}),
+        }});
+        if (!res.ok) throw new Error('server error');
+        const blob = await res.blob();
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = 'facefind_album.zip';
+        a.click();
+        setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+      }} catch (e) {{
+        alert('Download failed: ' + e.message);
+      }} finally {{
+        dlBtn.disabled = selected.size === 0;
+        dlBtn.textContent = '↓ download zip';
+      }}
+    }});
+  </script>
 </body></html>"""
 
 
 @app.route("/api/album/<album_id>/<filename>")
 def serve_album_image(album_id, filename):
-    return _serve_image_file(ALBUMS_DIR / album_id / filename)
+    album_dir = _safe_child(ALBUMS_DIR, album_id)
+    if album_dir is None:
+        return "Not found", 404
+    return _serve_image_file(_safe_child(album_dir, filename))
+
+
+@app.route("/api/album/<album_id>/download", methods=["POST"])
+def download_album_zip(album_id):
+    album_dir = _safe_child(ALBUMS_DIR, album_id)
+    if album_dir is None or not album_dir.is_dir():
+        return "Album not found", 404
+
+    filenames = (request.get_json(force=True) or {}).get("filenames", [])
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_STORED) as zf:
+        for name in filenames:
+            img_path = _safe_child(album_dir, name)
+            if img_path is not None and img_path.exists():
+                zf.write(img_path, img_path.name)
+    buf.seek(0)
+    return send_file(
+        buf,
+        mimetype="application/zip",
+        as_attachment=True,
+        download_name=f"facefind_album_{album_id}.zip",
+    )
 
 
 @app.route("/line/webhook", methods=["POST"])
