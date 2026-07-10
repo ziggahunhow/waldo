@@ -1,6 +1,7 @@
 import os
 import re
 from pathlib import Path
+from typing import Optional
 
 import gdown
 import requests
@@ -22,6 +23,18 @@ def extract_folder_id(url: str) -> str:
     if not match:
         raise ValueError(f"Invalid Google Drive folder URL: {url!r}")
     return match.group(1)
+
+
+def _safe_dest(cache_dir: Path, name: str) -> Optional[Path]:
+    """Reject Drive-reported filenames that would escape cache_dir via path
+    traversal (e.g. "../../line_bot.py" or "../../.env"). The folder owner
+    fully controls this string — it must never be trusted as a bare path
+    segment. Returns None if unsafe."""
+    resolved_dir = cache_dir.resolve()
+    candidate = (resolved_dir / name).resolve()
+    if candidate.parent != resolved_dir:
+        return None
+    return candidate
 
 
 def _list_all_files_api(folder_id: str, api_key: str) -> list[dict]:
@@ -65,7 +78,10 @@ def download_images(url: str, cache_dir: Path) -> None:
                 f["name"].lower().endswith(ext)
                 for ext in (".jpg", ".jpeg", ".png", ".heic", ".heif")
             ):
-                dest = cache_dir / f["name"]
+                dest = _safe_dest(cache_dir, f["name"])
+                if dest is None:
+                    print(f"Skipping unsafe filename: {f['name']!r}")
+                    continue
                 if dest.exists():
                     print(f"Skipping (cached): {f['name']}")
                     continue
