@@ -251,89 +251,181 @@ def album_page(album_id):
 
     filenames = sorted(p.name for p in album_dir.iterdir() if p.is_file())
     items = "\n".join(
-        f'<div class="item" data-name="{name}">'
-        f'<img src="/api/album/{album_id}/{name}" loading="lazy">'
-        f'<button class="sel" title="Select photo">✓</button>'
+        f'<div class="result-item" data-name="{name}">'
+        f'<img src="/api/album/{album_id}/{name}" alt="{name}" loading="lazy">'
+        f'<button class="result-select" title="Select photo">✓</button>'
         f'</div>'
         for name in filenames
     )
     return f"""<!doctype html>
 <html><head><title>FaceFind album</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500&display=swap" rel="stylesheet">
 <style>
-  body {{ background:#111; color:#eee; font-family:sans-serif; margin:0; padding:16px 16px 80px; }}
-  h1 {{ font-size:16px; font-weight:normal; opacity:0.7; }}
-  .grid {{ display:grid; grid-template-columns:repeat(auto-fill,minmax(180px,1fr)); gap:8px; }}
-  .item {{ position:relative; border-radius:6px; overflow:hidden; }}
-  .item img {{ display:block; width:100%; height:180px; object-fit:cover; cursor:pointer; }}
-  .item.selected img {{ outline:3px solid #4caf50; outline-offset:-3px; }}
-  .item .sel {{
-    position:absolute; top:6px; right:6px; width:22px; height:22px;
-    background:rgba(0,0,0,0.4); border:1px solid rgba(255,255,255,0.35); border-radius:5px;
-    color:transparent; font-size:0.7rem; font-weight:700;
-    display:flex; align-items:center; justify-content:center; cursor:pointer; padding:0;
+  :root {{
+    --bg:           #090805;
+    --surface:      #111009;
+    --surface-3:    #222015;
+    --amber:        #C4862C;
+    --amber-border: rgba(196, 134, 44, 0.25);
+    --text:         #EDE6D6;
+    --text-dim:     #7E7060;
+    --text-muted:   #42392C;
+    --border:       #211F15;
   }}
-  .item.selected .sel {{ background:#4caf50; border-color:#4caf50; color:#111; }}
-  .bar {{
-    position:fixed; left:0; right:0; bottom:0; padding:12px 16px;
-    background:#1c1c1c; border-top:1px solid #333;
-    display:flex; align-items:center; gap:12px; flex-wrap:wrap;
+  * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+  body {{
+    background: var(--bg); color: var(--text);
+    font-family: 'JetBrains Mono', monospace;
+    padding: 1.5rem 1.5rem 6rem;
   }}
-  .bar button {{
-    background:#2a2a2a; color:#eee; border:1px solid #444; border-radius:6px;
-    padding:8px 14px; cursor:pointer; font-size:14px;
+  h1 {{
+    font-size: 0.65rem; font-weight: 400; letter-spacing: 0.12em;
+    color: var(--text-dim); text-transform: uppercase; margin-bottom: 1rem;
   }}
-  .bar button:disabled {{ opacity:0.4; cursor:default; }}
-  .bar .count {{ opacity:0.7; font-size:13px; margin-right:auto; }}
+  .grid {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 3px; }}
+
+  .result-item {{ position: relative; aspect-ratio: 1; overflow: hidden; background: var(--surface); cursor: pointer; }}
+  .result-item img {{
+    width: 100%; height: 100%; object-fit: cover; display: block;
+    transition: transform 0.4s ease, filter 0.4s ease;
+    filter: brightness(0.9) contrast(1.05) saturate(0.9);
+  }}
+  .result-item:hover img {{ transform: scale(1.04); filter: brightness(1) contrast(1.02) saturate(1); }}
+  .result-item.selected img {{ filter: brightness(0.55) saturate(0.7); }}
+  .result-item.selected {{ outline: 2px solid var(--amber); outline-offset: -2px; }}
+
+  .result-select {{
+    position: absolute; top: 6px; right: 6px; width: 22px; height: 22px;
+    background: rgba(0,0,0,0.55); border: 1px solid rgba(255,255,255,0.45);
+    color: transparent; font-size: 0.62rem; font-weight: 600;
+    display: flex; align-items: center; justify-content: center;
+    cursor: pointer; z-index: 3;
+    transition: background 0.15s, color 0.15s, border-color 0.15s;
+  }}
+  .result-select:hover {{ border-color: var(--amber); color: var(--amber-border); }}
+  .result-item.selected .result-select {{ background: var(--amber); border-color: var(--amber); color: var(--bg); }}
+
+  /* ── Lightbox ── */
+  .lightbox {{
+    position: fixed; inset: 0; background: rgba(0,0,0,0.92); z-index: 500;
+    display: flex; align-items: center; justify-content: center; flex-direction: column; gap: 1rem;
+    opacity: 0; pointer-events: none; transition: opacity 0.2s;
+  }}
+  .lightbox.visible {{ opacity: 1; pointer-events: all; }}
+  .lightbox img {{ max-width: min(90vw, 1200px); max-height: 82vh; object-fit: contain; display: block; box-shadow: 0 16px 64px rgba(0,0,0,0.8); }}
+  .lightbox-name {{ font-size: 0.65rem; color: var(--text-muted); letter-spacing: 0.1em; }}
+  .lightbox-close {{
+    position: absolute; top: 1.5rem; right: 1.5rem; background: none; border: 1px solid var(--border);
+    color: var(--text-muted); font-family: 'JetBrains Mono', monospace; font-size: 0.65rem;
+    padding: 0.35rem 0.65rem; cursor: pointer; letter-spacing: 0.1em; transition: color 0.15s, border-color 0.15s;
+  }}
+  .lightbox-close:hover {{ color: var(--text); border-color: var(--text-dim); }}
+
+  /* ── Selection bar ── */
+  .selection-bar {{
+    position: fixed; bottom: 2rem; left: 50%;
+    transform: translateX(-50%) translateY(calc(100% + 2rem));
+    transition: transform 0.35s cubic-bezier(0.4, 0, 0.2, 1);
+    background: var(--surface-3); border: 1px solid var(--amber-border);
+    padding: 0.7rem 0.9rem; display: flex; align-items: center; gap: 0.75rem;
+    z-index: 200; white-space: nowrap; box-shadow: 0 8px 32px rgba(0,0,0,0.6);
+  }}
+  .selection-bar.visible {{ transform: translateX(-50%) translateY(0); }}
+  .sel-count {{ font-size: 0.65rem; color: var(--amber); letter-spacing: 0.1em; min-width: 6rem; }}
+  .sel-divider {{ width: 1px; height: 1rem; background: var(--border); }}
+  .btn-sel {{
+    background: none; border: none; font-family: 'JetBrains Mono', monospace;
+    font-size: 0.62rem; font-weight: 300; letter-spacing: 0.1em; cursor: pointer;
+    padding: 0.2rem 0.1rem; color: var(--text-muted); transition: color 0.15s;
+  }}
+  .btn-sel:hover {{ color: var(--text); }}
+  .btn-download-sel {{
+    background: var(--amber); border: none; color: var(--bg);
+    font-family: 'JetBrains Mono', monospace; font-size: 0.62rem; font-weight: 400;
+    letter-spacing: 0.12em; padding: 0.45rem 0.9rem; cursor: pointer; transition: opacity 0.15s;
+  }}
+  .btn-download-sel:hover {{ opacity: 0.85; }}
+  .btn-download-sel:disabled {{ opacity: 0.4; cursor: default; }}
 </style></head>
 <body>
   <h1>{len(filenames)} matched photo(s)</h1>
   <div class="grid" id="grid">{items}</div>
 
-  <div class="bar">
-    <span class="count" id="count">0 selected</span>
-    <button id="sel-all">select all</button>
-    <button id="sel-none">select none</button>
-    <button id="dl" disabled>↓ download zip</button>
+  <div class="lightbox" id="lightbox">
+    <button class="lightbox-close" id="lightbox-close">✕ close</button>
+    <img id="lightbox-img" src="" alt="">
+    <span class="lightbox-name" id="lightbox-name"></span>
+  </div>
+
+  <div class="selection-bar" id="selection-bar">
+    <span class="sel-count" id="sel-count">0 selected</span>
+    <div class="sel-divider"></div>
+    <button class="btn-sel" id="btn-sel-all">select all</button>
+    <button class="btn-sel" id="btn-sel-none">deselect</button>
+    <div class="sel-divider"></div>
+    <button class="btn-download-sel" id="btn-download-sel" disabled>↓ download zip</button>
   </div>
 
   <script>
     const albumId = {album_id!r};
     const grid = document.getElementById('grid');
-    const countEl = document.getElementById('count');
-    const dlBtn = document.getElementById('dl');
+    const selectionBar = document.getElementById('selection-bar');
+    const selCount = document.getElementById('sel-count');
+    const dlBtn = document.getElementById('btn-download-sel');
     const selected = new Set();
 
     // Prefer the native share sheet on phones (Save to Photos/Files) over a
     // zip, which most mobile browsers can't usefully "open" on download.
     const canShareFiles = !!(navigator.canShare && navigator.share);
-    dlBtn.textContent = canShareFiles ? '📤 share photos' : '↓ download zip';
+    const dlLabel = canShareFiles ? '📤 share photos' : '↓ download zip';
+    dlBtn.textContent = dlLabel;
 
     function setSelected(item, on) {{
       const name = item.dataset.name;
       item.classList.toggle('selected', on);
       if (on) selected.add(name); else selected.delete(name);
-      countEl.textContent = selected.size === 0 ? '0 selected' : `${{selected.size}} selected`;
+      selCount.textContent = selected.size === 0 ? '0 selected' : `${{selected.size}} selected`;
+      selectionBar.classList.toggle('visible', selected.size > 0);
       dlBtn.disabled = selected.size === 0;
     }}
 
-    grid.querySelectorAll('.item').forEach(item => {{
-      item.querySelector('.sel').addEventListener('click', e => {{
+    grid.querySelectorAll('.result-item').forEach(item => {{
+      item.querySelector('.result-select').addEventListener('click', e => {{
         e.stopPropagation();
         setSelected(item, !item.classList.contains('selected'));
       }});
       item.querySelector('img').addEventListener('click', () => {{
-        setSelected(item, !item.classList.contains('selected'));
+        openLightbox(item.querySelector('img').src, item.dataset.name);
       }});
     }});
 
-    document.getElementById('sel-all').addEventListener('click', () => {{
-      grid.querySelectorAll('.item').forEach(item => setSelected(item, true));
+    document.getElementById('btn-sel-all').addEventListener('click', () => {{
+      grid.querySelectorAll('.result-item').forEach(item => setSelected(item, true));
     }});
-    document.getElementById('sel-none').addEventListener('click', () => {{
-      grid.querySelectorAll('.item').forEach(item => setSelected(item, false));
+    document.getElementById('btn-sel-none').addEventListener('click', () => {{
+      grid.querySelectorAll('.result-item').forEach(item => setSelected(item, false));
     }});
 
+    // ── Lightbox ──
+    const lightbox = document.getElementById('lightbox');
+    const lightboxImg = document.getElementById('lightbox-img');
+    const lightboxName = document.getElementById('lightbox-name');
+
+    function openLightbox(src, name) {{
+      lightboxImg.src = src;
+      lightboxName.textContent = name;
+      lightbox.classList.add('visible');
+    }}
+    function closeLightbox() {{
+      lightbox.classList.remove('visible');
+      lightboxImg.src = '';
+    }}
+    document.getElementById('lightbox-close').addEventListener('click', closeLightbox);
+    lightbox.addEventListener('click', e => {{ if (e.target === lightbox) closeLightbox(); }});
+
+    // ── Download / share ──
     async function shareSelected() {{
       const files = await Promise.all([...selected].map(async name => {{
         const res = await fetch(`/api/album/${{albumId}}/${{encodeURIComponent(name)}}`);
@@ -361,7 +453,6 @@ def album_page(album_id):
 
     dlBtn.addEventListener('click', async () => {{
       dlBtn.disabled = true;
-      const original = dlBtn.textContent;
       dlBtn.textContent = canShareFiles ? 'preparing…' : 'zipping…';
       try {{
         if (canShareFiles) {{
@@ -373,7 +464,7 @@ def album_page(album_id):
         if (e.name !== 'AbortError') alert('Download failed: ' + e.message);
       }} finally {{
         dlBtn.disabled = selected.size === 0;
-        dlBtn.textContent = original;
+        dlBtn.textContent = dlLabel;
       }}
     }});
   </script>
