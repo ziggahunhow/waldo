@@ -59,7 +59,7 @@ _DRIVE_LINK_RE = re.compile(
 # users to supply their own reference photos.
 _REF_DIR = Path.home() / "Documents" / "photos" / "target_person"
 _DEFAULT_TOLERANCE = 0.25
-_DEFAULT_DETECTOR = "mediapipe"
+_DEFAULT_DETECTOR = "insightface"
 
 _MAX_IMAGES_TO_SEND = 10
 
