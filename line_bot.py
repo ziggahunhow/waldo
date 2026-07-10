@@ -13,7 +13,12 @@ Settings sub-flow (available any time refs exist):
 Setup
 ─────
   LINE_CHANNEL_SECRET       – channel secret from LINE Developer Console
-  LINE_CHANNEL_ACCESS_TOKEN – long-lived token from LINE Developer Console
+  LINE_CHANNEL_ACCESS_TOKEN – long-lived token from LINE Developer Console.
+                              If unset, LINE_CHANNEL_ID + LINE_CHANNEL_SECRET
+                              are exchanged for a short-lived token instead.
+  LINE_CHANNEL_ID           – channel ID; used with LINE_CHANNEL_SECRET to
+                              exchange a short-lived access token when
+                              LINE_CHANNEL_ACCESS_TOKEN isn't set.
   PUBLIC_URL                – publicly reachable base URL of this server
                               (e.g. https://abc123.ngrok.io)
                               Required to send matched images; without it the
@@ -25,7 +30,10 @@ import re
 import shutil
 import tempfile
 import threading
+import time
 from pathlib import Path
+
+import requests
 
 from linebot.v3 import WebhookHandler
 from linebot.v3.messaging import (
@@ -78,9 +86,55 @@ def _reset_session(user_id: str) -> None:
 
 handler = WebhookHandler(os.environ.get("LINE_CHANNEL_SECRET", ""))
 
+# Cached short-lived channel access token (exchanged from channel ID + secret).
+_token_cache: dict = {"token": None, "expires_at": 0.0}
+_token_lock = threading.Lock()
+_LINE_TOKEN_URL = "https://api.line.me/v2/oauth/accessToken"
+
+
+def _access_token() -> str:
+    """Return a Messaging API access token.
+
+    Prefers an explicitly-set long-lived LINE_CHANNEL_ACCESS_TOKEN. Otherwise
+    exchanges LINE_CHANNEL_ID + LINE_CHANNEL_SECRET for a short-lived token via
+    LINE's client-credentials grant, caching it until shortly before expiry.
+    """
+    explicit = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", "").strip()
+    if explicit:
+        return explicit
+
+    with _token_lock:
+        now = time.time()
+        if _token_cache["token"] and now < _token_cache["expires_at"]:
+            return _token_cache["token"]
+
+        channel_id = os.environ.get("LINE_CHANNEL_ID", "").strip()
+        channel_secret = os.environ.get("LINE_CHANNEL_SECRET", "").strip()
+        if not (channel_id and channel_secret):
+            raise RuntimeError(
+                "LINE credentials missing: set LINE_CHANNEL_ACCESS_TOKEN, or both "
+                "LINE_CHANNEL_ID and LINE_CHANNEL_SECRET."
+            )
+
+        resp = requests.post(
+            _LINE_TOKEN_URL,
+            data={
+                "grant_type": "client_credentials",
+                "client_id": channel_id,
+                "client_secret": channel_secret,
+            },
+            timeout=15,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        _token_cache["token"] = data["access_token"]
+        # Refresh a minute early to avoid using a token mid-expiry.
+        _token_cache["expires_at"] = now + max(0, int(data.get("expires_in", 2592000)) - 60)
+        return _token_cache["token"]
+
 
 def _cfg() -> Configuration:
-    return Configuration(access_token=os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", ""))
+    return Configuration(access_token=_access_token())
 
 
 def _reply(reply_token: str, messages: list) -> None:
