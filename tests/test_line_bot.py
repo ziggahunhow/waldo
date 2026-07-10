@@ -116,9 +116,11 @@ def test_save_album_copies_files_and_dedupes_names(tmp_path, monkeypatch):
     assert (album_dir / "photo_folder.jpg").read_bytes() == b"bbb"
 
 
-def _fake_text_event(user_id: str, text: str, reply_token: str = "reply-token"):
+def _fake_text_event(group_id: str, text: str, reply_token: str = "reply-token"):
+    """Fake a group-chat event by default — on_text now only acts on
+    group/room sources, so this is the shape most tests need."""
     return SimpleNamespace(
-        source=SimpleNamespace(type="user", user_id=user_id),
+        source=SimpleNamespace(type="group", group_id=group_id, user_id="U_sender"),
         reply_token=reply_token,
         message=SimpleNamespace(text=text),
     )
@@ -266,3 +268,112 @@ def test_run_search_serves_cached_album_without_recomputing(mock_push, tmp_path,
     mock_push.assert_called_once()
     _, messages = mock_push.call_args[0]
     assert "先前搜尋過的快取結果" in messages[0].text
+
+
+# ── DM rejection ─────────────────────────────────────────────────────────────────
+
+@patch("line_bot.threading.Thread")
+@patch("line_bot._reply")
+def test_on_text_in_dm_is_rejected_and_ignores_content(mock_reply, mock_thread):
+    url = "https://drive.google.com/drive/folders/abc123"
+    event = SimpleNamespace(
+        source=SimpleNamespace(type="user", user_id="U_dm"),
+        reply_token="reply-token",
+        message=SimpleNamespace(text=url),
+    )
+    line_bot.on_text(event)
+
+    mock_reply.assert_called_once()
+    assert "僅限群組使用" in _reply_text(mock_reply)
+    mock_thread.assert_not_called()
+
+
+# ── Join handler (access control) ─────────────────────────────────────────────────
+
+def _fake_join_event(source, reply_token: str = "reply-token"):
+    return SimpleNamespace(source=source, reply_token=reply_token)
+
+
+@patch("line_bot._leave")
+@patch("line_bot._member_present", return_value=True)
+@patch.dict("os.environ", {"ADMIN_LINE_USER_ID": "U_admin"}, clear=True)
+@patch("line_bot._reply")
+def test_on_join_stays_when_admin_present(mock_reply, mock_member_present, mock_leave):
+    source = SimpleNamespace(type="group", group_id="G1", user_id=None)
+    line_bot.on_join(_fake_join_event(source))
+
+    mock_member_present.assert_called_once_with(source, "U_admin")
+    mock_leave.assert_not_called()
+    assert "僅限管理員" not in _reply_text(mock_reply)
+
+
+@patch("line_bot._leave")
+@patch("line_bot._member_present", return_value=False)
+@patch.dict("os.environ", {"ADMIN_LINE_USER_ID": "U_admin"}, clear=True)
+@patch("line_bot._reply")
+def test_on_join_leaves_when_admin_not_a_member(mock_reply, mock_member_present, mock_leave):
+    source = SimpleNamespace(type="group", group_id="G2", user_id=None)
+    line_bot.on_join(_fake_join_event(source))
+
+    mock_leave.assert_called_once_with(source)
+    assert "僅限管理員" in _reply_text(mock_reply)
+
+
+@patch("line_bot._leave")
+@patch("line_bot._member_present")
+@patch.dict("os.environ", {}, clear=True)
+@patch("line_bot._reply")
+def test_on_join_leaves_when_admin_not_configured(mock_reply, mock_member_present, mock_leave):
+    source = SimpleNamespace(type="room", room_id="R1", user_id=None)
+    line_bot.on_join(_fake_join_event(source))
+
+    mock_member_present.assert_not_called()  # no point checking with no id to check for
+    mock_leave.assert_called_once_with(source)
+    assert "僅限管理員" in _reply_text(mock_reply)
+
+
+@patch("line_bot._leave")
+@patch("line_bot._member_present", side_effect=RuntimeError("account tier doesn't support this"))
+@patch.dict("os.environ", {"ADMIN_LINE_USER_ID": "U_admin"}, clear=True)
+@patch("line_bot._reply")
+def test_on_join_fails_closed_when_membership_check_errors(mock_reply, mock_member_present, mock_leave):
+    source = SimpleNamespace(type="group", group_id="G3", user_id=None)
+    line_bot.on_join(_fake_join_event(source))
+
+    mock_leave.assert_called_once_with(source)
+    assert "僅限管理員" in _reply_text(mock_reply)
+
+
+@patch("line_bot._member_present")
+@patch("line_bot._reply")
+def test_on_join_ignores_non_group_non_room_source(mock_reply, mock_member_present):
+    source = SimpleNamespace(type="user", user_id="U1")
+    line_bot.on_join(_fake_join_event(source))
+
+    mock_reply.assert_not_called()
+    mock_member_present.assert_not_called()
+
+
+@patch("line_bot._cfg")
+def test_member_present_paginates_until_found(mock_cfg):
+    page1 = SimpleNamespace(member_ids=["Ux", "Uy"], next="token2")
+    page2 = SimpleNamespace(member_ids=["U_admin"], next=None)
+    mock_api = MagicMock()
+    mock_api.get_group_members_ids.side_effect = [page1, page2]
+
+    with patch("line_bot.ApiClient"), patch("line_bot.MessagingApi", return_value=mock_api):
+        source = SimpleNamespace(type="group", group_id="G1")
+        assert line_bot._member_present(source, "U_admin") is True
+
+    assert mock_api.get_group_members_ids.call_count == 2
+
+
+@patch("line_bot._cfg")
+def test_member_present_returns_false_when_exhausted(mock_cfg):
+    page1 = SimpleNamespace(member_ids=["Ux"], next=None)
+    mock_api = MagicMock()
+    mock_api.get_group_members_ids.side_effect = [page1]
+
+    with patch("line_bot.ApiClient"), patch("line_bot.MessagingApi", return_value=mock_api):
+        source = SimpleNamespace(type="group", group_id="G1")
+        assert line_bot._member_present(source, "U_admin") is False

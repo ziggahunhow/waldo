@@ -2,6 +2,20 @@
 
 Flow
 ────
+  Group/room chats only. A 1:1 DM gets one explanatory reply and nothing
+  else happens.
+
+  Access control: when the bot is added to a group/room (JoinEvent), it
+  checks whether ADMIN_LINE_USER_ID is a member of that group/room via the
+  Messaging API. If not present — or if that check itself fails for any
+  reason (e.g. account tier doesn't support member listing) — the bot
+  replies with why, then leaves immediately (fail-closed: unable to verify
+  means don't stay). LINE's join event doesn't tell us who actually invited
+  the bot, so this is a proxy: "stay only in groups/rooms the admin is
+  also in," not a literal invite-permission check. This is checked once at
+  join time only — if the admin later leaves a group, the bot doesn't
+  re-check and won't auto-leave.
+
   Commands: /help (show usage), /stop (cancel the caller's active search).
 
   Any other text message: extract Google Drive folder link(s) → download
@@ -10,7 +24,7 @@ Flow
   message if something fails along the way). A repeat search with the exact
   same set of Drive URLs (an album already saved from a prior >10-match run)
   is served straight from that cache instead of re-downloading/re-matching.
-  Only one search runs at a time per user; a second link while one is
+  Only one search runs at a time per group/room; a second link while one is
   already running gets an "already running" reply instead of starting a
   second one.
 
@@ -27,6 +41,10 @@ Setup
   LINE_CHANNEL_ID           – channel ID; used with LINE_CHANNEL_SECRET to
                               exchange a short-lived access token when
                               LINE_CHANNEL_ACCESS_TOKEN isn't set.
+  ADMIN_LINE_USER_ID        – your own LINE user ID. The bot only stays in
+                              groups/rooms you're a member of; DM the bot
+                              once and check logs/server.log for
+                              "on_text target=<your id>" to find it.
   PUBLIC_URL                – publicly reachable base URL of this server
                               (e.g. https://abc123.ngrok.io)
                               Required to send matched images; without it the
@@ -56,7 +74,7 @@ from linebot.v3.messaging import (
     ReplyMessageRequest,
     TextMessage,
 )
-from linebot.v3.webhooks import MessageEvent, TextMessageContent
+from linebot.v3.webhooks import JoinEvent, MessageEvent, TextMessageContent
 
 from cache import get_cache_dir, list_cached_images
 from drive import download_images, extract_folder_id
@@ -223,6 +241,10 @@ def on_text(event: MessageEvent) -> None:
     text = event.message.text.strip()
     logger.info("on_text target=%s text=%r", target_id, text)
 
+    if event.source.type == "user":
+        _reply(event.reply_token, [_txt("此機器人僅限群組使用，請將我加入群組後再試。")])
+        return
+
     low = text.lower()
 
     if low == "/help":
@@ -260,6 +282,70 @@ def on_text(event: MessageEvent) -> None:
         args=(target_id, urls, stop_event),
         daemon=True,
     ).start()
+
+
+# ── Join handler (access control) ────────────────────────────────────────────────
+
+def _group_or_room_id(source) -> str:
+    return source.group_id if source.type == "group" else source.room_id
+
+
+def _member_present(source, target_user_id: str) -> bool:
+    """Paginate through the group/room's member list checking for
+    target_user_id. Raises on API failure (e.g. account tier doesn't
+    support member listing) rather than swallowing it — the caller treats
+    any failure as fail-closed."""
+    with ApiClient(_cfg()) as client:
+        api = MessagingApi(client)
+        start = None
+        while True:
+            if source.type == "group":
+                resp = api.get_group_members_ids(source.group_id, start=start)
+            else:
+                resp = api.get_room_members_ids(source.room_id, start=start)
+            if target_user_id in resp.member_ids:
+                return True
+            start = resp.next
+            if not start:
+                return False
+
+
+def _leave(source) -> None:
+    with ApiClient(_cfg()) as client:
+        api = MessagingApi(client)
+        if source.type == "group":
+            api.leave_group(source.group_id)
+        else:
+            api.leave_room(source.room_id)
+
+
+@handler.add(JoinEvent)
+def on_join(event: JoinEvent) -> None:
+    source = event.source
+    if source.type not in ("group", "room"):
+        return
+
+    conv_id = _group_or_room_id(source)
+    admin_id = os.environ.get("ADMIN_LINE_USER_ID", "").strip()
+    logger.info("on_join type=%s id=%s", source.type, conv_id)
+
+    try:
+        if not admin_id:
+            raise RuntimeError("ADMIN_LINE_USER_ID not configured")
+        if not _member_present(source, admin_id):
+            raise RuntimeError("admin not a member of this group/room")
+    except Exception as e:
+        logger.warning("on_join leaving %s (%s): %s", conv_id, source.type, e)
+        _reply(event.reply_token, [_txt("此機器人僅限管理員邀請使用，即將離開。")])
+        try:
+            _leave(source)
+        except Exception:
+            logger.exception("on_join failed to leave %s", conv_id)
+        return
+
+    _reply(event.reply_token, [_txt(
+        "👋 哈囉！在群組中傳送 Google Drive 資料夾連結即可開始搜尋，輸入 /help 查看指令。"
+    )])
 
 
 # ── Background search ──────────────────────────────────────────────────────────
