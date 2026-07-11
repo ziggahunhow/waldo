@@ -3,5 +3,7 @@ training/
 results/
 logs/
 albums/
+refs/
+refs_staging/
 
 .env

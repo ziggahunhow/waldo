@@ -16,10 +16,11 @@ Flow
   join time only — if the admin later leaves a group, the bot doesn't
   re-check and won't auto-leave.
 
-  Commands: /help (show usage), /stop (cancel the caller's active search).
+  Commands: /help (show usage), /setref … /done (collect the shared
+  reference photos in-chat), /stop (cancel the caller's active search).
 
   Any other text message: extract Google Drive folder link(s) → download
-  images to cache → match against hardcoded reference photos → reply with
+  images to cache → match against the collected reference photos → reply with
   matched images, followed by a concluding "done" message (or an error
   message if something fails along the way). A repeat search with the exact
   same set of Drive URLs (an album already saved from a prior >10-match run)
@@ -59,6 +60,7 @@ import shutil
 import threading
 import time
 from pathlib import Path
+from typing import Optional
 
 import requests
 
@@ -70,23 +72,31 @@ from linebot.v3.messaging import (
     Configuration,
     ImageMessage,
     MessagingApi,
+    MessagingApiBlob,
     PushMessageRequest,
     ReplyMessageRequest,
     TextMessage,
 )
-from linebot.v3.webhooks import JoinEvent, MessageEvent, TextMessageContent
+from linebot.v3.webhooks import (
+    ImageMessageContent,
+    JoinEvent,
+    MessageEvent,
+    TextMessageContent,
+)
 
 from cache import get_cache_dir, list_cached_images
-from drive import download_images, extract_folder_id
+from drive import count_folder_images, download_images, extract_folder_id
 from recognizer import encode_references, is_match
 
 _DRIVE_LINK_RE = re.compile(
     r"https://drive\.google\.com/drive/(?:u/\d+/)?folders/[a-zA-Z0-9_-]+"
 )
 
-# TODO: hardcode needs to be removed later — replace with a real way for
-# users to supply their own reference photos.
-_REF_DIR = Path.home() / "Documents" / "photos" / "target_person"
+# Reference photos are collected in-chat via /setref … /done. REFS_DIR is the
+# live set read at search time; REFS_STAGING_DIR holds an in-progress
+# collection so an abandoned or empty /setref can never break the live set.
+REFS_DIR = Path(__file__).parent / "refs"
+REFS_STAGING_DIR = Path(__file__).parent / "refs_staging"
 _DEFAULT_TOLERANCE = 0.25
 _DEFAULT_DETECTOR = "insightface"
 
@@ -97,19 +107,30 @@ ALBUMS_DIR = Path(__file__).parent / "albums"
 # One active search per user at a time — /stop signals the matching Event.
 _active_searches: dict[str, threading.Event] = {}
 
+# One reference-photo collection at a time, system-wide (the reference set is
+# global, so concurrent collections would all write the same staging dir).
+# {"user_id": str, "count": int} while a /setref session is open, else None.
+# In-memory only: a server restart mid-collection (e.g. the dev auto-reloader)
+# drops it, and the initiator just re-runs /setref — refs_staging/ keeps this
+# from ever corrupting the live refs/ set.
+_ref_collector: Optional[dict] = None
+_ref_lock = threading.Lock()
+
 _HELP_TEXT = (
     "📖 可用指令：\n"
     "/help — 顯示這個說明\n"
+    "/setref — 開始設定參考照片（接著傳送人像照片）\n"
+    "/done — 完成設定參考照片\n"
     "/stop — 停止目前正在執行的搜尋\n\n"
     "使用方式：直接傳送包含 Google Drive 資料夾連結的訊息，我就會開始搜尋符合的照片。"
 )
 
 
 def _reference_photo_paths() -> list[str]:
-    if not _REF_DIR.exists():
+    if not REFS_DIR.exists():
         return []
     return sorted(
-        str(p) for p in _REF_DIR.iterdir()
+        str(p) for p in REFS_DIR.iterdir()
         if p.is_file() and not p.name.startswith(".")
     )
 
@@ -221,6 +242,12 @@ def _txt(text: str) -> TextMessage:
     return TextMessage(text=text)
 
 
+def _sender_id(source):
+    """The individual LINE user who sent the event (may be None for some
+    clients), as opposed to _push_target()'s group/room delivery id."""
+    return getattr(source, "user_id", None)
+
+
 def _push_target(source) -> str:
     """Where push_message should send follow-up messages for this event's
     source. A user's own id only reaches their 1:1 chat with the bot — in a
@@ -249,6 +276,14 @@ def on_text(event: MessageEvent) -> None:
 
     if low == "/help":
         _reply(event.reply_token, [_txt(_HELP_TEXT)])
+        return
+
+    if low == "/setref":
+        _start_ref_collection(event, _sender_id(event.source))
+        return
+
+    if low == "/done":
+        _finish_ref_collection(event, _sender_id(event.source))
         return
 
     if low == "/stop":
@@ -282,6 +317,104 @@ def on_text(event: MessageEvent) -> None:
         args=(target_id, urls, stop_event),
         daemon=True,
     ).start()
+
+
+# ── Reference photo collection (/setref … images … /done) ────────────────────────
+
+def _start_ref_collection(event: MessageEvent, sender_id: Optional[str]) -> None:
+    if not sender_id:
+        _reply(event.reply_token, [_txt("無法識別你的使用者 ID，請改用其他裝置再試一次。")])
+        return
+
+    global _ref_collector
+    with _ref_lock:
+        busy = _ref_collector is not None
+        if not busy:
+            shutil.rmtree(REFS_STAGING_DIR, ignore_errors=True)
+            REFS_STAGING_DIR.mkdir(parents=True, exist_ok=True)
+            _ref_collector = {"user_id": sender_id, "count": 0}
+
+    if busy:
+        _reply(event.reply_token, [_txt("已有人正在收集參考照片，請稍候。")])
+        return
+    logger.info("setref start user=%s", sender_id)
+    _reply(event.reply_token, [_txt(
+        "📸 開始收集參考照片。請傳送 3-5 張人像照片（只有你傳送的照片會被使用），完成後輸入 /done。"
+    )])
+
+
+def _finish_ref_collection(event: MessageEvent, sender_id: Optional[str]) -> None:
+    global _ref_collector
+    count = 0
+    with _ref_lock:
+        collector = _ref_collector
+        if collector is None:
+            action = "none"
+        elif collector["user_id"] != sender_id:
+            action = "not_owner"
+        elif collector["count"] == 0:
+            _ref_collector = None
+            action = "empty"
+        else:
+            count = collector["count"]
+            # Atomically swap staging into the live set: drop the old refs/,
+            # promote refs_staging/ → refs/, then recreate an empty staging dir.
+            shutil.rmtree(REFS_DIR, ignore_errors=True)
+            REFS_STAGING_DIR.rename(REFS_DIR)
+            REFS_STAGING_DIR.mkdir(parents=True, exist_ok=True)
+            _ref_collector = None
+            action = "done"
+
+    if action == "none":
+        _reply(event.reply_token, [_txt("目前沒有正在收集的參考照片。")])
+    elif action == "not_owner":
+        _reply(event.reply_token, [_txt("只有發起 /setref 的人可以使用 /done。")])
+    elif action == "empty":
+        _reply(event.reply_token, [_txt("尚未收到任何照片，保留原本的參考照片。")])
+    else:
+        logger.info("setref done user=%s count=%d", sender_id, count)
+        _reply(event.reply_token, [_txt(f"✅ 已更新參考照片（共 {count} 張）。")])
+
+
+def _get_image_bytes(message_id: str) -> bytes:
+    with ApiClient(_cfg()) as client:
+        return bytes(MessagingApiBlob(client).get_message_content(message_id))
+
+
+@handler.add(MessageEvent, message=ImageMessageContent)
+def on_image(event: MessageEvent) -> None:
+    # Only meaningful mid-collection, and only in groups/rooms (DMs rejected
+    # like on_text). Anything else — no collection, or a photo from someone
+    # who isn't the initiator — is ignored silently.
+    if event.source.type == "user":
+        return
+    sender_id = _sender_id(event.source)
+
+    collector = _ref_collector
+    if collector is None or not sender_id or sender_id != collector["user_id"]:
+        return
+
+    # Fetch the (slow) image bytes outside the lock, then commit under it so a
+    # concurrent /done or second photo can't hand out a duplicate index.
+    try:
+        content = _get_image_bytes(event.message.id)
+    except Exception:
+        logger.exception("on_image failed to fetch content")
+        return
+
+    with _ref_lock:
+        collector = _ref_collector
+        if collector is None or sender_id != collector["user_id"]:
+            return  # collection ended or changed hands while we were fetching
+        idx = collector["count"]
+        REFS_STAGING_DIR.mkdir(parents=True, exist_ok=True)
+        (REFS_STAGING_DIR / f"ref_{idx}.jpg").write_bytes(content)
+        collector["count"] = idx + 1
+        count = collector["count"]
+
+    _reply(event.reply_token, [_txt(
+        f"已收到第 {count} 張參考照片，傳送更多或輸入 /done 完成。"
+    )])
 
 
 # ── Join handler (access control) ────────────────────────────────────────────────
@@ -350,6 +483,19 @@ def on_join(event: JoinEvent) -> None:
 
 # ── Background search ──────────────────────────────────────────────────────────
 
+# Rough download throughput used only to give the user a heads-up estimate.
+_SECONDS_PER_IMAGE = 2
+
+
+def _download_notice(url: str) -> str:
+    """A single, informative 'downloading' notice with a rough time estimate."""
+    count = count_folder_images(url)
+    if not count:
+        return "⬇️ 開始下載資料夾，請稍候…"
+    minutes = max(1, round(count * _SECONDS_PER_IMAGE / 60))
+    return f"⬇️ 開始下載資料夾（約 {count} 張照片，預計約 {minutes} 分鐘）…"
+
+
 def _run_search(target_id: str, urls: list[str], stop_event: threading.Event) -> None:
     public_url = os.environ.get("PUBLIC_URL", "").rstrip("/")
     album_id = _album_id(urls)
@@ -368,7 +514,7 @@ def _run_search(target_id: str, urls: list[str], stop_event: threading.Event) ->
 
         ref_paths = _reference_photo_paths()
         if not ref_paths:
-            _push(target_id, [_txt(f"❌ 在 {_REF_DIR} 找不到參考照片")])
+            _push(target_id, [_txt("❌ 尚未設定參考照片，請先使用 /setref 設定。")])
             return
 
         known = encode_references(ref_paths, detector=_DEFAULT_DETECTOR)
@@ -393,7 +539,7 @@ def _run_search(target_id: str, urls: list[str], stop_event: threading.Event) ->
             cached = list_cached_images(cache_dir)
 
             if not cached:
-                _push(target_id, [_txt("⬇️ 正在下載資料夾…請稍候。")])
+                _push(target_id, [_txt(_download_notice(url))])
                 try:
                     download_images(url, cache_dir)
                 except Exception as e:

@@ -85,15 +85,18 @@ and leaves immediately if not (or if that check fails for any reason) — see
 `line_bot.py`'s module docstring for the exact behavior and its limits.
 
 **Usage:** send any message containing a Google Drive folder link and the
-bot searches it against a fixed set of reference photos, replying with
+bot searches it against the shared reference photos, replying with
 matches (or a link to a web album if there are more than 10). `/help` lists
 commands; `/stop` cancels an in-progress search.
 
-> Reference photos are currently a hardcoded local directory
-> (`_REF_DIR` in `line_bot.py`) rather than something you configure through
-> chat — see the `TODO` there and
-> `docs/superpowers/specs/2026-07-10-line-bot-dynamic-refs-design.md` for
-> the planned `/setref` / `/done` replacement.
+**Reference photos** are set in-chat, not hardcoded. Send `/setref`, then send
+3–5 portrait photos of the target person (only the initiator's photos count),
+then `/done` to commit them. The set is global — one shared set across every
+group the bot is in — and is stored under `refs/` (staged in `refs_staging/`
+until `/done`, so an abandoned collection never breaks the live set). Until a
+set exists, searches reply asking you to run `/setref` first. See
+`docs/superpowers/specs/2026-07-10-line-bot-dynamic-refs-design.md` for the
+full design.
 
 ## Limitations
 

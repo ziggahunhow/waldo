@@ -60,6 +60,28 @@ def _list_all_files_api(folder_id: str, api_key: str) -> list[dict]:
     return files
 
 
+def _is_image(f: dict) -> bool:
+    image_mime = {"image/jpeg", "image/png", "image/heif", "image/heic"}
+    return f.get("mimeType") in image_mime or any(
+        f["name"].lower().endswith(ext)
+        for ext in (".jpg", ".jpeg", ".png", ".heic", ".heif")
+    )
+
+
+def count_folder_images(url: str) -> Optional[int]:
+    """Return the number of image files in a public Drive folder, or None if it
+    can't be determined cheaply (no GOOGLE_API_KEY, or a listing error)."""
+    api_key = os.environ.get("GOOGLE_API_KEY")
+    if not api_key:
+        return None
+    try:
+        folder_id = extract_folder_id(url)
+        files = _list_all_files_api(folder_id, api_key)
+    except (ValueError, requests.RequestException):
+        return None
+    return sum(1 for f in files if _is_image(f))
+
+
 def download_images(url: str, cache_dir: Path) -> None:
     """Download all files from a public Google Drive folder into cache_dir.
 
@@ -72,12 +94,8 @@ def download_images(url: str, cache_dir: Path) -> None:
     if api_key:
         folder_id = extract_folder_id(url)
         files = _list_all_files_api(folder_id, api_key)
-        image_mime = {"image/jpeg", "image/png", "image/heif", "image/heic"}
         for f in files:
-            if f.get("mimeType") in image_mime or any(
-                f["name"].lower().endswith(ext)
-                for ext in (".jpg", ".jpeg", ".png", ".heic", ".heif")
-            ):
+            if _is_image(f):
                 dest = _safe_dest(cache_dir, f["name"])
                 if dest is None:
                     print(f"Skipping unsafe filename: {f['name']!r}")

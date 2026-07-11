@@ -521,4 +521,11 @@ def line_webhook():
 
 
 if __name__ == "__main__":
-    app.run(debug=True, port=5565)
+    # Auto-reloader on for dev convenience. It restarts on any .py change,
+    # which drops in-memory state: an in-progress /setref collection is lost
+    # and the initiator just re-runs it (refs_staging/ keeps this from ever
+    # corrupting the live refs/ set). The Werkzeug debugger stays opt-in
+    # (FLASK_DEBUG=1): it's an RCE risk once this server is reachable through a
+    # public tunnel.
+    debug = os.environ.get("FLASK_DEBUG", "").lower() in ("1", "true", "yes")
+    app.run(port=5565, debug=debug, use_reloader=True)

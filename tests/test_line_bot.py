@@ -68,7 +68,7 @@ def test_reference_photo_paths_filters_hidden_files_and_dirs(tmp_path, monkeypat
     (tmp_path / "b.jpg").write_bytes(b"x")
     (tmp_path / ".DS_Store").write_bytes(b"x")
     (tmp_path / "subdir").mkdir()
-    monkeypatch.setattr(line_bot, "_REF_DIR", tmp_path)
+    monkeypatch.setattr(line_bot, "REFS_DIR", tmp_path)
 
     paths = line_bot._reference_photo_paths()
 
@@ -76,7 +76,7 @@ def test_reference_photo_paths_filters_hidden_files_and_dirs(tmp_path, monkeypat
 
 
 def test_reference_photo_paths_missing_dir_returns_empty(tmp_path, monkeypatch):
-    monkeypatch.setattr(line_bot, "_REF_DIR", tmp_path / "does-not-exist")
+    monkeypatch.setattr(line_bot, "REFS_DIR", tmp_path / "does-not-exist")
 
     assert line_bot._reference_photo_paths() == []
 
@@ -377,3 +377,154 @@ def test_member_present_returns_false_when_exhausted(mock_cfg):
     with patch("line_bot.ApiClient"), patch("line_bot.MessagingApi", return_value=mock_api):
         source = SimpleNamespace(type="group", group_id="G1")
         assert line_bot._member_present(source, "U_admin") is False
+
+
+# ── Reference photo collection (/setref … images … /done) ────────────────────────
+
+def _fake_ref_text_event(user_id, text, reply_token="reply-token"):
+    return SimpleNamespace(
+        source=SimpleNamespace(type="group", group_id="G_ref", user_id=user_id),
+        reply_token=reply_token,
+        message=SimpleNamespace(text=text),
+    )
+
+
+def _fake_image_event(user_id, message_id="M1", reply_token="reply-token"):
+    return SimpleNamespace(
+        source=SimpleNamespace(type="group", group_id="G_ref", user_id=user_id),
+        reply_token=reply_token,
+        message=SimpleNamespace(id=message_id),
+    )
+
+
+def _stage_refs(tmp_path, monkeypatch):
+    """Point REFS_DIR/REFS_STAGING_DIR at tmp dirs and reset collector state."""
+    refs = tmp_path / "refs"
+    staging = tmp_path / "refs_staging"
+    staging.mkdir()
+    monkeypatch.setattr(line_bot, "REFS_DIR", refs)
+    monkeypatch.setattr(line_bot, "REFS_STAGING_DIR", staging)
+    monkeypatch.setattr(line_bot, "_ref_collector", None)
+    return refs, staging
+
+
+@patch("line_bot._reply")
+def test_setref_starts_collection(mock_reply, tmp_path, monkeypatch):
+    _stage_refs(tmp_path, monkeypatch)
+
+    line_bot.on_text(_fake_ref_text_event("U_init", "/setref"))
+
+    assert line_bot._ref_collector == {"user_id": "U_init", "count": 0}
+    assert "開始收集參考照片" in _reply_text(mock_reply)
+
+
+@patch("line_bot._reply")
+def test_setref_rejected_while_another_collection_active(mock_reply, tmp_path, monkeypatch):
+    _stage_refs(tmp_path, monkeypatch)
+    monkeypatch.setattr(line_bot, "_ref_collector", {"user_id": "U_other", "count": 2})
+
+    line_bot.on_text(_fake_ref_text_event("U_init", "/setref"))
+
+    # untouched — the other person's session survives
+    assert line_bot._ref_collector == {"user_id": "U_other", "count": 2}
+    assert "已有人正在收集" in _reply_text(mock_reply)
+
+
+@patch("line_bot._reply")
+def test_setref_errors_when_sender_id_missing(mock_reply, tmp_path, monkeypatch):
+    _stage_refs(tmp_path, monkeypatch)
+
+    line_bot.on_text(_fake_ref_text_event(None, "/setref"))
+
+    assert line_bot._ref_collector is None
+    assert "無法識別你的使用者 ID" in _reply_text(mock_reply)
+
+
+@patch("line_bot._get_image_bytes", return_value=b"jpegbytes")
+@patch("line_bot._reply")
+def test_on_image_from_initiator_is_saved(mock_reply, mock_get, tmp_path, monkeypatch):
+    _, staging = _stage_refs(tmp_path, monkeypatch)
+    monkeypatch.setattr(line_bot, "_ref_collector", {"user_id": "U_init", "count": 0})
+
+    line_bot.on_image(_fake_image_event("U_init"))
+
+    assert (staging / "ref_0.jpg").read_bytes() == b"jpegbytes"
+    assert line_bot._ref_collector["count"] == 1
+    assert "已收到第 1 張" in _reply_text(mock_reply)
+
+
+@patch("line_bot._get_image_bytes")
+@patch("line_bot._reply")
+def test_on_image_from_non_initiator_is_ignored(mock_reply, mock_get, tmp_path, monkeypatch):
+    _, staging = _stage_refs(tmp_path, monkeypatch)
+    monkeypatch.setattr(line_bot, "_ref_collector", {"user_id": "U_init", "count": 0})
+
+    line_bot.on_image(_fake_image_event("U_someone_else"))
+
+    mock_get.assert_not_called()
+    mock_reply.assert_not_called()
+    assert line_bot._ref_collector["count"] == 0
+    assert not any(staging.iterdir())
+
+
+@patch("line_bot._get_image_bytes")
+@patch("line_bot._reply")
+def test_on_image_ignored_when_no_collection_active(mock_reply, mock_get, tmp_path, monkeypatch):
+    _stage_refs(tmp_path, monkeypatch)  # collector is None
+
+    line_bot.on_image(_fake_image_event("U_init"))
+
+    mock_get.assert_not_called()
+    mock_reply.assert_not_called()
+
+
+@patch("line_bot._reply")
+def test_done_promotes_staging_into_live_refs(mock_reply, tmp_path, monkeypatch):
+    refs, staging = _stage_refs(tmp_path, monkeypatch)
+    (staging / "ref_0.jpg").write_bytes(b"a")
+    (staging / "ref_1.jpg").write_bytes(b"b")
+    monkeypatch.setattr(line_bot, "_ref_collector", {"user_id": "U_init", "count": 2})
+
+    line_bot.on_text(_fake_ref_text_event("U_init", "/done"))
+
+    assert line_bot._ref_collector is None
+    assert sorted(p.name for p in refs.iterdir()) == ["ref_0.jpg", "ref_1.jpg"]
+    assert line_bot.REFS_STAGING_DIR.exists()
+    assert not any(line_bot.REFS_STAGING_DIR.iterdir())  # recreated empty
+    assert "已更新參考照片（共 2 張）" in _reply_text(mock_reply)
+
+
+@patch("line_bot._reply")
+def test_done_by_non_initiator_leaves_state_untouched(mock_reply, tmp_path, monkeypatch):
+    refs, staging = _stage_refs(tmp_path, monkeypatch)
+    (staging / "ref_0.jpg").write_bytes(b"a")
+    monkeypatch.setattr(line_bot, "_ref_collector", {"user_id": "U_init", "count": 1})
+
+    line_bot.on_text(_fake_ref_text_event("U_intruder", "/done"))
+
+    assert line_bot._ref_collector == {"user_id": "U_init", "count": 1}
+    assert not refs.exists()  # not promoted
+    assert "只有發起 /setref 的人" in _reply_text(mock_reply)
+
+
+@patch("line_bot._reply")
+def test_done_with_no_photos_keeps_existing_refs(mock_reply, tmp_path, monkeypatch):
+    refs, staging = _stage_refs(tmp_path, monkeypatch)
+    refs.mkdir()
+    (refs / "old.jpg").write_bytes(b"keep-me")
+    monkeypatch.setattr(line_bot, "_ref_collector", {"user_id": "U_init", "count": 0})
+
+    line_bot.on_text(_fake_ref_text_event("U_init", "/done"))
+
+    assert line_bot._ref_collector is None
+    assert (refs / "old.jpg").read_bytes() == b"keep-me"  # untouched
+    assert "尚未收到任何照片" in _reply_text(mock_reply)
+
+
+@patch("line_bot._reply")
+def test_done_with_no_active_collection(mock_reply, tmp_path, monkeypatch):
+    _stage_refs(tmp_path, monkeypatch)  # collector is None
+
+    line_bot.on_text(_fake_ref_text_event("U_init", "/done"))
+
+    assert "目前沒有正在收集的參考照片" in _reply_text(mock_reply)
