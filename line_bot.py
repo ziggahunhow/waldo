@@ -84,7 +84,7 @@ from linebot.v3.webhooks import (
     TextMessageContent,
 )
 
-from cache import get_cache_dir, list_cached_images
+from cache import CACHE_ROOT, get_cache_dir, list_cached_images, prune_old_entries
 from drive import count_folder_images, download_images, extract_folder_id
 from recognizer import encode_references, is_match
 
@@ -103,6 +103,10 @@ _DEFAULT_DETECTOR = "insightface"
 _MAX_IMAGES_TO_SEND = 10
 
 ALBUMS_DIR = Path(__file__).parent / "albums"
+
+# Cached Drive downloads and saved albums are pruned once older than this on
+# every search, so disk doesn't grow without bound.
+_MAX_CACHE_AGE_SECONDS = 3 * 24 * 60 * 60
 
 # One active search per user at a time — /stop signals the matching Event.
 _active_searches: dict[str, threading.Event] = {}
@@ -513,6 +517,14 @@ def _download_notice(download_urls: list[str], cached_count: int) -> str:
 def _run_search(target_id: str, urls: list[str], stop_event: threading.Event) -> None:
     public_url = os.environ.get("PUBLIC_URL", "").rstrip("/")
     album_id = _album_id(urls)
+
+    # Every triggered search first sweeps out cache/album folders whose own
+    # timestamp is older than the retention window, so old downloads and albums
+    # don't accumulate on disk.
+    for root in (CACHE_ROOT, ALBUMS_DIR):
+        removed = prune_old_entries(root, _MAX_CACHE_AGE_SECONDS)
+        if removed:
+            logger.info("pruned %d stale entries from %s", removed, root)
 
     try:
         album_dir = ALBUMS_DIR / album_id
