@@ -483,22 +483,31 @@ def on_join(event: JoinEvent) -> None:
 
 # ── Background search ──────────────────────────────────────────────────────────
 
-# Rough download throughput used only to give the user a heads-up estimate.
-_SECONDS_PER_IMAGE = 2
+# Rough per-image throughput, used only for the heads-up estimate. Calibrated
+# from a real run (362 imgs: ~10 min download + ~11 min scan ≈ 21 min total).
+# Every image is scanned; only not-yet-cached images are downloaded.
+_DOWNLOAD_SECONDS_PER_IMAGE = 1.8
+_SCAN_SECONDS_PER_IMAGE = 2.0
 
 
-def _download_notice(urls: list[str]) -> str:
-    """One 'downloading' notice covering every folder that needs fetching, with
-    a rough time estimate from the total image count across all of them. Falls
-    back to a generic message if the count can't be determined for any folder."""
-    total = 0
-    for url in urls:
+def _download_notice(download_urls: list[str], cached_count: int) -> str:
+    """One notice covering the whole search, with a rough time estimate for the
+    full pipeline: downloading the not-yet-cached folders, then face-scanning
+    every image (downloaded + already cached). Falls back to a generic message
+    if a folder's image count can't be determined."""
+    download_count = 0
+    for url in download_urls:
         count = count_folder_images(url)
         if not count:
             return "⬇️ 開始下載資料夾，請稍候…"
-        total += count
-    minutes = max(1, round(total * _SECONDS_PER_IMAGE / 60))
-    return f"⬇️ 開始下載資料夾（約 {total} 張照片，預計約 {minutes} 分鐘）…"
+        download_count += count
+    scan_count = download_count + cached_count
+    seconds = (
+        download_count * _DOWNLOAD_SECONDS_PER_IMAGE
+        + scan_count * _SCAN_SECONDS_PER_IMAGE
+    )
+    minutes = max(1, round(seconds / 60))
+    return f"⬇️ 開始下載並比對（約 {download_count} 張照片，預計約 {minutes} 分鐘）…"
 
 
 def _run_search(target_id: str, urls: list[str], stop_event: threading.Event) -> None:
@@ -541,8 +550,9 @@ def _run_search(target_id: str, urls: list[str], stop_event: threading.Event) ->
             resolved.append((url, folder_id, cache_dir, list_cached_images(cache_dir)))
 
         to_download = [url for url, _, _, cached in resolved if not cached]
+        cached_count = sum(len(cached) for _, _, _, cached in resolved if cached)
         if to_download:
-            _push(target_id, [_txt(_download_notice(to_download))])
+            _push(target_id, [_txt(_download_notice(to_download, cached_count))])
 
         all_images: list[tuple[Path, str]] = []
         for url, folder_id, cache_dir, cached in resolved:
