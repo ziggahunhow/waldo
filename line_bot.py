@@ -487,13 +487,18 @@ def on_join(event: JoinEvent) -> None:
 _SECONDS_PER_IMAGE = 2
 
 
-def _download_notice(url: str) -> str:
-    """A single, informative 'downloading' notice with a rough time estimate."""
-    count = count_folder_images(url)
-    if not count:
-        return "⬇️ 開始下載資料夾，請稍候…"
-    minutes = max(1, round(count * _SECONDS_PER_IMAGE / 60))
-    return f"⬇️ 開始下載資料夾（約 {count} 張照片，預計約 {minutes} 分鐘）…"
+def _download_notice(urls: list[str]) -> str:
+    """One 'downloading' notice covering every folder that needs fetching, with
+    a rough time estimate from the total image count across all of them. Falls
+    back to a generic message if the count can't be determined for any folder."""
+    total = 0
+    for url in urls:
+        count = count_folder_images(url)
+        if not count:
+            return "⬇️ 開始下載資料夾，請稍候…"
+        total += count
+    minutes = max(1, round(total * _SECONDS_PER_IMAGE / 60))
+    return f"⬇️ 開始下載資料夾（約 {total} 張照片，預計約 {minutes} 分鐘）…"
 
 
 def _run_search(target_id: str, urls: list[str], stop_event: threading.Event) -> None:
@@ -522,24 +527,30 @@ def _run_search(target_id: str, urls: list[str], stop_event: threading.Event) ->
             _push(target_id, [_txt("⚠️ 參考照片中偵測不到人臉。")])
             return
 
-        all_images: list[tuple[Path, str]] = []
+        # Resolve every URL up front so we can announce all downloads in one
+        # message instead of one noisy notice per folder.
+        resolved: list[tuple[str, str, Path, list[Path]]] = []
         for url in urls:
-            if stop_event.is_set():
-                _push(target_id, [_txt("🛑 搜尋已停止。")])
-                return
-
             try:
                 folder_id = extract_folder_id(url)
             except ValueError as e:
                 logger.warning("search target=%s invalid url=%s: %s", target_id, url, e)
                 _push(target_id, [_txt(f"⚠️ 略過無效連結：{e}")])
                 continue
-
             cache_dir = get_cache_dir(folder_id)
-            cached = list_cached_images(cache_dir)
+            resolved.append((url, folder_id, cache_dir, list_cached_images(cache_dir)))
+
+        to_download = [url for url, _, _, cached in resolved if not cached]
+        if to_download:
+            _push(target_id, [_txt(_download_notice(to_download))])
+
+        all_images: list[tuple[Path, str]] = []
+        for url, folder_id, cache_dir, cached in resolved:
+            if stop_event.is_set():
+                _push(target_id, [_txt("🛑 搜尋已停止。")])
+                return
 
             if not cached:
-                _push(target_id, [_txt(_download_notice(url))])
                 try:
                     download_images(url, cache_dir)
                 except Exception as e:
