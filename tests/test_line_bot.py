@@ -147,9 +147,10 @@ def test_push_target_uses_room_id_for_multi_person_room():
     assert line_bot._push_target(source) == "R123"
 
 
+@patch("line_bot._require_approved", return_value=True)
 @patch("line_bot.threading.Thread")
 @patch("line_bot._reply")
-def test_on_text_in_group_pushes_results_to_group_not_sender(mock_reply, mock_thread):
+def test_on_text_in_group_pushes_results_to_group_not_sender(mock_reply, mock_thread, mock_gate):
     group_id = "G_search_1"
     line_bot._active_searches.pop(group_id, None)
     event = SimpleNamespace(
@@ -175,9 +176,10 @@ def test_on_text_without_drive_links_is_silently_ignored(mock_reply, mock_thread
     mock_thread.assert_not_called()
 
 
+@patch("line_bot._require_approved", return_value=True)
 @patch("line_bot.threading.Thread")
 @patch("line_bot._reply")
-def test_on_text_with_drive_link_starts_search_thread(mock_reply, mock_thread):
+def test_on_text_with_drive_link_starts_search_thread(mock_reply, mock_thread, mock_gate):
     line_bot._active_searches.clear()
     url = "https://drive.google.com/drive/folders/abc123"
     line_bot.on_text(_fake_text_event("U2", f"check this out {url}"))
@@ -192,9 +194,10 @@ def test_on_text_with_drive_link_starts_search_thread(mock_reply, mock_thread):
     mock_thread.return_value.start.assert_called_once()
 
 
+@patch("line_bot._require_approved", return_value=True)
 @patch("line_bot.threading.Thread")
 @patch("line_bot._reply")
-def test_on_text_dedupes_repeated_drive_links(mock_reply, mock_thread):
+def test_on_text_dedupes_repeated_drive_links(mock_reply, mock_thread, mock_gate):
     line_bot._active_searches.clear()
     url = "https://drive.google.com/drive/folders/abc123"
     line_bot.on_text(_fake_text_event("U3", f"{url} and again {url}"))
@@ -234,9 +237,10 @@ def test_on_text_stop_signals_active_search(mock_reply):
         line_bot._active_searches.pop(user_id, None)
 
 
+@patch("line_bot._require_approved", return_value=True)
 @patch("line_bot.threading.Thread")
 @patch("line_bot._reply")
-def test_on_text_blocks_second_search_while_one_is_running(mock_reply, mock_thread):
+def test_on_text_blocks_second_search_while_one_is_running(mock_reply, mock_thread, mock_gate):
     user_id = "U7"
     line_bot._active_searches[user_id] = line_bot.threading.Event()  # not yet set = running
 
@@ -288,95 +292,99 @@ def test_on_text_in_dm_is_rejected_and_ignores_content(mock_reply, mock_thread):
     mock_thread.assert_not_called()
 
 
-# ── Join handler (access control) ─────────────────────────────────────────────────
+# ── Join handler & approval (access control) ──────────────────────────────────────
 
 def _fake_join_event(source, reply_token: str = "reply-token"):
     return SimpleNamespace(source=source, reply_token=reply_token)
 
 
-@patch("line_bot._leave")
-@patch("line_bot._member_present", return_value=True)
-@patch.dict("os.environ", {"ADMIN_LINE_USER_ID": "U_admin"}, clear=True)
+def _fake_cmd_event(text, group_id="G_appr", user_id="U_sender", reply_token="reply-token"):
+    return SimpleNamespace(
+        source=SimpleNamespace(type="group", group_id=group_id, user_id=user_id),
+        reply_token=reply_token,
+        message=SimpleNamespace(text=text),
+    )
+
+
 @patch("line_bot._reply")
-def test_on_join_stays_when_admin_present(mock_reply, mock_member_present, mock_leave):
-    source = SimpleNamespace(type="group", group_id="G1", user_id=None)
+def test_on_join_prompts_for_approval_when_not_approved(mock_reply, monkeypatch):
+    monkeypatch.setattr(line_bot, "_approved_groups", set())
+    source = SimpleNamespace(type="group", group_id="G_new", user_id=None)
     line_bot.on_join(_fake_join_event(source))
 
-    mock_member_present.assert_called_once_with(source, "U_admin")
-    mock_leave.assert_not_called()
-    assert "僅限管理員" not in _reply_text(mock_reply)
+    assert "/approve" in _reply_text(mock_reply)
 
 
-@patch("line_bot._leave")
-@patch("line_bot._member_present", return_value=False)
-@patch.dict("os.environ", {"ADMIN_LINE_USER_ID": "U_admin"}, clear=True)
 @patch("line_bot._reply")
-def test_on_join_leaves_when_admin_not_a_member(mock_reply, mock_member_present, mock_leave):
-    source = SimpleNamespace(type="group", group_id="G2", user_id=None)
+def test_on_join_welcomes_when_already_approved(mock_reply, monkeypatch):
+    monkeypatch.setattr(line_bot, "_approved_groups", {"G_known"})
+    source = SimpleNamespace(type="group", group_id="G_known", user_id=None)
     line_bot.on_join(_fake_join_event(source))
 
-    mock_leave.assert_called_once_with(source)
-    assert "僅限管理員" in _reply_text(mock_reply)
+    assert "已啟用" in _reply_text(mock_reply)
 
 
-@patch("line_bot._leave")
-@patch("line_bot._member_present")
-@patch.dict("os.environ", {}, clear=True)
 @patch("line_bot._reply")
-def test_on_join_leaves_when_admin_not_configured(mock_reply, mock_member_present, mock_leave):
-    source = SimpleNamespace(type="room", room_id="R1", user_id=None)
-    line_bot.on_join(_fake_join_event(source))
-
-    mock_member_present.assert_not_called()  # no point checking with no id to check for
-    mock_leave.assert_called_once_with(source)
-    assert "僅限管理員" in _reply_text(mock_reply)
-
-
-@patch("line_bot._leave")
-@patch("line_bot._member_present", side_effect=RuntimeError("account tier doesn't support this"))
-@patch.dict("os.environ", {"ADMIN_LINE_USER_ID": "U_admin"}, clear=True)
-@patch("line_bot._reply")
-def test_on_join_fails_closed_when_membership_check_errors(mock_reply, mock_member_present, mock_leave):
-    source = SimpleNamespace(type="group", group_id="G3", user_id=None)
-    line_bot.on_join(_fake_join_event(source))
-
-    mock_leave.assert_called_once_with(source)
-    assert "僅限管理員" in _reply_text(mock_reply)
-
-
-@patch("line_bot._member_present")
-@patch("line_bot._reply")
-def test_on_join_ignores_non_group_non_room_source(mock_reply, mock_member_present):
+def test_on_join_ignores_non_group_non_room_source(mock_reply):
     source = SimpleNamespace(type="user", user_id="U1")
     line_bot.on_join(_fake_join_event(source))
 
     mock_reply.assert_not_called()
-    mock_member_present.assert_not_called()
 
 
-@patch("line_bot._cfg")
-def test_member_present_paginates_until_found(mock_cfg):
-    page1 = SimpleNamespace(member_ids=["Ux", "Uy"], next="token2")
-    page2 = SimpleNamespace(member_ids=["U_admin"], next=None)
-    mock_api = MagicMock()
-    mock_api.get_group_members_ids.side_effect = [page1, page2]
+@patch.dict("os.environ", {"ADMIN_LINE_USER_ID": "U_admin"}, clear=True)
+@patch("line_bot._set_approved")
+@patch("line_bot._reply")
+def test_approve_by_admin_enables_group(mock_reply, mock_set, monkeypatch):
+    line_bot.on_text(_fake_cmd_event("/approve", group_id="G_x", user_id="U_admin"))
 
-    with patch("line_bot.ApiClient"), patch("line_bot.MessagingApi", return_value=mock_api):
-        source = SimpleNamespace(type="group", group_id="G1")
-        assert line_bot._member_present(source, "U_admin") is True
-
-    assert mock_api.get_group_members_ids.call_count == 2
+    mock_set.assert_called_once_with("G_x", True)
+    assert "已啟用" in _reply_text(mock_reply)
 
 
-@patch("line_bot._cfg")
-def test_member_present_returns_false_when_exhausted(mock_cfg):
-    page1 = SimpleNamespace(member_ids=["Ux"], next=None)
-    mock_api = MagicMock()
-    mock_api.get_group_members_ids.side_effect = [page1]
+@patch.dict("os.environ", {"ADMIN_LINE_USER_ID": "U_admin"}, clear=True)
+@patch("line_bot._set_approved")
+@patch("line_bot._reply")
+def test_approve_by_non_admin_is_rejected(mock_reply, mock_set):
+    line_bot.on_text(_fake_cmd_event("/approve", group_id="G_x", user_id="U_other"))
 
-    with patch("line_bot.ApiClient"), patch("line_bot.MessagingApi", return_value=mock_api):
-        source = SimpleNamespace(type="group", group_id="G1")
-        assert line_bot._member_present(source, "U_admin") is False
+    mock_set.assert_not_called()
+    assert "只有管理員" in _reply_text(mock_reply)
+
+
+@patch.dict("os.environ", {"ADMIN_LINE_USER_ID": "U_admin"}, clear=True)
+@patch("line_bot._set_approved")
+@patch("line_bot._reply")
+def test_revoke_by_admin_disables_group(mock_reply, mock_set):
+    line_bot.on_text(_fake_cmd_event("/revoke", group_id="G_x", user_id="U_admin"))
+
+    mock_set.assert_called_once_with("G_x", False)
+    assert "已停用" in _reply_text(mock_reply)
+
+
+@patch("line_bot.threading.Thread")
+@patch("line_bot._reply")
+def test_search_blocked_in_unapproved_group(mock_reply, mock_thread, monkeypatch):
+    monkeypatch.setattr(line_bot, "_approved_groups", set())
+    url = "https://drive.google.com/drive/folders/abc123"
+    line_bot.on_text(_fake_cmd_event(url, group_id="G_unapproved"))
+
+    mock_thread.assert_not_called()
+    assert "尚未啟用" in _reply_text(mock_reply)
+
+
+def test_set_approved_persists_atomically(tmp_path, monkeypatch):
+    f = tmp_path / "approved_groups.json"
+    monkeypatch.setattr(line_bot, "APPROVED_GROUPS_FILE", f)
+    monkeypatch.setattr(line_bot, "_approved_groups", set())
+
+    line_bot._set_approved("G_a", True)
+    assert line_bot._load_approved_groups() == {"G_a"}
+    assert line_bot._is_approved("G_a")
+
+    line_bot._set_approved("G_a", False)
+    assert line_bot._load_approved_groups() == set()
+    assert not line_bot._is_approved("G_a")
 
 
 # ── Reference photo collection (/setref … images … /done) ────────────────────────
@@ -405,6 +413,7 @@ def _stage_refs(tmp_path, monkeypatch):
     monkeypatch.setattr(line_bot, "REFS_DIR", refs)
     monkeypatch.setattr(line_bot, "REFS_STAGING_DIR", staging)
     monkeypatch.setattr(line_bot, "_ref_collector", None)
+    monkeypatch.setattr(line_bot, "_approved_groups", {"G_ref"})  # setref/done are gated
     return refs, staging
 
 

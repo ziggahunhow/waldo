@@ -79,14 +79,17 @@ webhook at `https://<your-public-url>/line/webhook`.
 or `LINE_CHANNEL_ID` in `.env` (see `.env.example` for details on each var,
 including `ADMIN_LINE_USER_ID` and `PUBLIC_URL`).
 
-**Access control:** the bot only responds in group/room chats, not 1:1 DMs.
-When added to a group, it checks whether `ADMIN_LINE_USER_ID` is a member
-and leaves immediately if not (or if that check fails for any reason) — see
-`line_bot.py`'s module docstring for the exact behavior and its limits.
+**Access control:** the bot only responds in group/room chats, not 1:1 DMs, and
+each group must be approved before it can do anything. When added to a group it
+stays but stays inert until the admin (`ADMIN_LINE_USER_ID`) sends `/approve` in
+that chat; `/revoke` disables it again. Approvals persist in `approved_groups.json`.
+The admin is identified by the message sender's user id, so this works on an
+unverified LINE account (no member-list API needed). See `line_bot.py`'s module
+docstring for details.
 
-**Usage:** send any message containing a Google Drive folder link and the
-bot searches it against the shared reference photos, replying with
-matches (or a link to a web album if there are more than 10). `/help` lists
+**Usage:** in an approved group, send any message containing a Google Drive
+folder link and the bot searches it against the shared reference photos, replying
+with matches (or a link to a web album if there are more than 10). `/help` lists
 commands; `/stop` cancels an in-progress search.
 
 **Reference photos** are set in-chat, not hardcoded. Send `/setref`, then send

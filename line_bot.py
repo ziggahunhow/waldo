@@ -5,19 +5,18 @@ Flow
   Group/room chats only. A 1:1 DM gets one explanatory reply and nothing
   else happens.
 
-  Access control: when the bot is added to a group/room (JoinEvent), it
-  checks whether ADMIN_LINE_USER_ID is a member of that group/room via the
-  Messaging API. If not present — or if that check itself fails for any
-  reason (e.g. account tier doesn't support member listing) — the bot
-  replies with why, then leaves immediately (fail-closed: unable to verify
-  means don't stay). LINE's join event doesn't tell us who actually invited
-  the bot, so this is a proxy: "stay only in groups/rooms the admin is
-  also in," not a literal invite-permission check. This is checked once at
-  join time only — if the admin later leaves a group, the bot doesn't
-  re-check and won't auto-leave.
+  Access control: an explicit per-group allowlist (approved_groups.json).
+  When added to a group/room the bot stays but does nothing useful until the
+  admin (ADMIN_LINE_USER_ID) sends /approve in that chat; /revoke disables it
+  again. Searching and reference-photo commands are gated on approval, so an
+  unapproved group can't run searches or overwrite the shared reference set.
+  We identify the admin by the message sender's user id (present in group
+  message events) rather than the group member-list API, which requires a
+  verified/premium LINE account.
 
-  Commands: /help (show usage), /setref … /done (collect the shared
-  reference photos in-chat), /stop (cancel the caller's active search).
+  Commands: /help (show usage), /approve … /revoke (admin: enable/disable
+  this group), /setref … /done (collect the shared reference photos in-chat),
+  /stop (cancel the caller's active search).
 
   Any other text message: extract Google Drive folder link(s) → download
   images to cache → match against the collected reference photos → reply with
@@ -42,10 +41,10 @@ Setup
   LINE_CHANNEL_ID           – channel ID; used with LINE_CHANNEL_SECRET to
                               exchange a short-lived access token when
                               LINE_CHANNEL_ACCESS_TOKEN isn't set.
-  ADMIN_LINE_USER_ID        – your own LINE user ID. The bot only stays in
-                              groups/rooms you're a member of; DM the bot
-                              once and check logs/server.log for
-                              "on_text target=<your id>" to find it.
+  ADMIN_LINE_USER_ID        – your own LINE user ID. Only this user can
+                              /approve or /revoke a group. DM the bot once and
+                              check logs/server.log for "on_text target=<your
+                              id>" to find it.
   PUBLIC_URL                – publicly reachable base URL of this server
                               (e.g. https://abc123.ngrok.io)
                               Required to send matched images; without it the
@@ -53,6 +52,7 @@ Setup
 """
 
 import hashlib
+import json
 import logging
 import os
 import re
@@ -120,9 +120,48 @@ _active_searches: dict[str, threading.Event] = {}
 _ref_collector: Optional[dict] = None
 _ref_lock = threading.Lock()
 
+# Per-group allowlist: only groups/rooms the admin has /approve'd may run
+# searches or reference-photo commands. Persisted to disk so approvals survive
+# restarts; loaded once at import and kept in sync on every change.
+APPROVED_GROUPS_FILE = Path(__file__).parent / "approved_groups.json"
+_approved_lock = threading.Lock()
+
+
+def _load_approved_groups() -> set[str]:
+    try:
+        with APPROVED_GROUPS_FILE.open() as f:
+            data = json.load(f)
+        return {str(x) for x in data} if isinstance(data, list) else set()
+    except (OSError, ValueError):
+        return set()
+
+
+_approved_groups: set[str] = _load_approved_groups()
+
+
+def _is_approved(conv_id: str) -> bool:
+    return conv_id in _approved_groups
+
+
+def _set_approved(conv_id: str, approved: bool) -> None:
+    """Add or remove conv_id from the persisted allowlist (atomic write)."""
+    with _approved_lock:
+        if approved:
+            _approved_groups.add(conv_id)
+        else:
+            _approved_groups.discard(conv_id)
+        try:
+            tmp = APPROVED_GROUPS_FILE.with_name(APPROVED_GROUPS_FILE.name + ".tmp")
+            tmp.write_text(json.dumps(sorted(_approved_groups)))
+            tmp.replace(APPROVED_GROUPS_FILE)
+        except OSError:
+            logger.exception("failed to persist approved groups")
+
 _HELP_TEXT = (
     "📖 可用指令：\n"
     "/help — 顯示這個說明\n"
+    "/approve — （管理員）在這個群組啟用搜尋功能\n"
+    "/revoke — （管理員）停用這個群組\n"
     "/setref — 開始設定參考照片（接著傳送人像照片）\n"
     "/done — 完成設定參考照片\n"
     "/stop — 停止目前正在執行的搜尋\n\n"
@@ -282,11 +321,23 @@ def on_text(event: MessageEvent) -> None:
         _reply(event.reply_token, [_txt(_HELP_TEXT)])
         return
 
+    if low == "/approve":
+        _handle_approval(event, approve=True)
+        return
+
+    if low == "/revoke":
+        _handle_approval(event, approve=False)
+        return
+
     if low == "/setref":
+        if not _require_approved(event):
+            return
         _start_ref_collection(event, _sender_id(event.source))
         return
 
     if low == "/done":
+        if not _require_approved(event):
+            return
         _finish_ref_collection(event, _sender_id(event.source))
         return
 
@@ -302,6 +353,9 @@ def on_text(event: MessageEvent) -> None:
     urls = list(dict.fromkeys(_DRIVE_LINK_RE.findall(text)))
     if not urls:
         # Doesn't match any command or contain a Drive link — ignore silently.
+        return
+
+    if not _require_approved(event):
         return
 
     existing = _active_searches.get(target_id)
@@ -421,39 +475,45 @@ def on_image(event: MessageEvent) -> None:
     )])
 
 
-# ── Join handler (access control) ────────────────────────────────────────────────
+# ── Join handler & approval (access control) ─────────────────────────────────────
 
 def _group_or_room_id(source) -> str:
     return source.group_id if source.type == "group" else source.room_id
 
 
-def _member_present(source, target_user_id: str) -> bool:
-    """Paginate through the group/room's member list checking for
-    target_user_id. Raises on API failure (e.g. account tier doesn't
-    support member listing) rather than swallowing it — the caller treats
-    any failure as fail-closed."""
-    with ApiClient(_cfg()) as client:
-        api = MessagingApi(client)
-        start = None
-        while True:
-            if source.type == "group":
-                resp = api.get_group_members_ids(source.group_id, start=start)
-            else:
-                resp = api.get_room_members_ids(source.room_id, start=start)
-            if target_user_id in resp.member_ids:
-                return True
-            start = resp.next
-            if not start:
-                return False
+def _is_admin(source) -> bool:
+    """True only for the configured ADMIN_LINE_USER_ID. Group message events
+    carry the sender's user id even on unverified accounts, so this doesn't need
+    the verified/premium-only member-list API."""
+    admin_id = os.environ.get("ADMIN_LINE_USER_ID", "").strip()
+    return bool(admin_id) and _sender_id(source) == admin_id
 
 
-def _leave(source) -> None:
-    with ApiClient(_cfg()) as client:
-        api = MessagingApi(client)
-        if source.type == "group":
-            api.leave_group(source.group_id)
-        else:
-            api.leave_room(source.room_id)
+def _require_approved(event) -> bool:
+    """Gate for operational commands. Replies with how to enable and returns
+    False when this group/room isn't on the allowlist."""
+    if _is_approved(_group_or_room_id(event.source)):
+        return True
+    _reply(event.reply_token, [_txt(
+        "⚠️ 這個群組尚未啟用，請管理員在這裡輸入 /approve 以啟用。"
+    )])
+    return False
+
+
+def _handle_approval(event, approve: bool) -> None:
+    source = event.source
+    if not _is_admin(source):
+        _reply(event.reply_token, [_txt("⚠️ 只有管理員可以執行此操作。")])
+        return
+    conv_id = _group_or_room_id(source)
+    _set_approved(conv_id, approve)
+    logger.info("approval set conv=%s approved=%s by admin", conv_id, approve)
+    if approve:
+        _reply(event.reply_token, [_txt(
+            "✅ 已啟用！這個群組現在可以使用搜尋功能了，傳送 Google Drive 資料夾連結即可開始。"
+        )])
+    else:
+        _reply(event.reply_token, [_txt("🚫 已停用，這個群組已無法使用搜尋功能。")])
 
 
 @handler.add(JoinEvent)
@@ -463,26 +523,17 @@ def on_join(event: JoinEvent) -> None:
         return
 
     conv_id = _group_or_room_id(source)
-    admin_id = os.environ.get("ADMIN_LINE_USER_ID", "").strip()
-    logger.info("on_join type=%s id=%s", source.type, conv_id)
+    approved = _is_approved(conv_id)
+    logger.info("on_join type=%s id=%s approved=%s", source.type, conv_id, approved)
 
-    try:
-        if not admin_id:
-            raise RuntimeError("ADMIN_LINE_USER_ID not configured")
-        if not _member_present(source, admin_id):
-            raise RuntimeError("admin not a member of this group/room")
-    except Exception as e:
-        logger.warning("on_join leaving %s (%s): %s", conv_id, source.type, e)
-        _reply(event.reply_token, [_txt("此機器人僅限管理員邀請使用，即將離開。")])
-        try:
-            _leave(source)
-        except Exception:
-            logger.exception("on_join failed to leave %s", conv_id)
-        return
-
-    _reply(event.reply_token, [_txt(
-        "👋 哈囉！在群組中傳送 Google Drive 資料夾連結即可開始搜尋，輸入 /help 查看指令。"
-    )])
+    if approved:
+        _reply(event.reply_token, [_txt(
+            "👋 哈囉！這個群組已啟用，傳送 Google Drive 資料夾連結即可開始搜尋，輸入 /help 查看指令。"
+        )])
+    else:
+        _reply(event.reply_token, [_txt(
+            "👋 哈囉！請管理員在這個群組輸入 /approve 以啟用搜尋功能。"
+        )])
 
 
 # ── Background search ──────────────────────────────────────────────────────────
