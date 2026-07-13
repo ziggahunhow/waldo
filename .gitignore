@@ -6,5 +6,6 @@ albums/
 refs/
 refs_staging/
 approved_groups.json
+__pycache__/
 
 .env

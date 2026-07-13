@@ -1,0 +1,23 @@
+services:
+  waldo:
+    build:
+      context: .
+      # Build over host networking — matches the runtime and avoids transient
+      # bridge-network timeouts to the debian/pypi mirrors.
+      network: host
+    image: waldo-server
+    container_name: waldo-server
+    # Share the host network namespace so the server binds 127.0.0.1:5565 on the
+    # host, exactly where the (also host-networked) cloudflared-waldo container
+    # forwards line.toastarica.sbs.
+    network_mode: host
+    # LINE_CHANNEL_*, ADMIN_LINE_USER_ID, GOOGLE_API_KEY, PUBLIC_URL, FLASK_DEBUG.
+    env_file: .env
+    volumes:
+      # Live code + persistent data dirs (.cache, albums, refs, refs_staging,
+      # logs, approved_groups.json all live in the repo and persist on the host).
+      - ./:/app
+      # Reuse the already-downloaded insightface buffalo_l model (~600MB) instead
+      # of re-fetching it on every container recreate.
+      - ${HOME}/.insightface:/root/.insightface
+    restart: unless-stopped

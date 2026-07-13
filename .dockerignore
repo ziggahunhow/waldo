@@ -1,0 +1,14 @@
+# Keep the build context small — only requirements.txt is COPYied in; everything
+# else is bind-mounted at runtime.
+.venv/
+.git/
+.cache/
+albums/
+results/
+logs/
+refs/
+refs_staging/
+__pycache__/
+**/__pycache__/
+.pytest_cache/
+*.pyc
