@@ -9,7 +9,7 @@ Flow
   When added to a group/room the bot stays but does nothing useful until the
   admin (ADMIN_LINE_USER_ID) sends /approve in that chat; /revoke disables it
   again. Searching and reference-photo commands are gated on approval, so an
-  unapproved group can't run searches or overwrite the shared reference set.
+  unapproved group can't run searches or touch its reference set.
   We identify the admin by the message sender's user id (present in group
   message events) rather than the group member-list API, which requires a
   verified/premium LINE account.
@@ -22,11 +22,11 @@ Flow
 
   Commands: /help (show usage), /approve … /revoke (admin: enable/disable
   this group; in a DM take a group id argument), /groups (admin DM: list
-  enabled groups), /setref … /done (collect the shared reference photos
+  enabled groups), /setref … /done (collect this group's own reference photos
   in-chat), /stop (cancel the caller's active search).
 
   Any other text message: extract Google Drive folder link(s) → download
-  images to cache → match against the collected reference photos → reply with
+  images to cache → match against this group's reference photos → reply with
   matched images, followed by a concluding "done" message (or an error
   message if something fails along the way). A repeat search with the exact
   same set of Drive URLs (an album already saved from a prior >10-match run)
@@ -99,11 +99,19 @@ _DRIVE_LINK_RE = re.compile(
     r"https://drive\.google\.com/drive/(?:u/\d+/)?folders/[a-zA-Z0-9_-]+"
 )
 
-# Reference photos are collected in-chat via /setref … /done. REFS_DIR is the
-# live set read at search time; REFS_STAGING_DIR holds an in-progress
-# collection so an abandoned or empty /setref can never break the live set.
+# Reference photos are collected in-chat via /setref … /done and kept per group
+# (or room): each conversation has its own subdirectory under REFS_DIR, so
+# different groups can target different people. REFS_DIR/<conv id> is the live
+# set read at search time; REFS_STAGING_DIR/<conv id> holds that group's
+# in-progress collection so an abandoned or empty /setref can never break its
+# live set. Groups are fully isolated — a group with no subdirectory yet simply
+# has no reference photos and must run /setref before it can search.
 REFS_DIR = Path(__file__).parent / "refs"
 REFS_STAGING_DIR = Path(__file__).parent / "refs_staging"
+
+# LINE group/room ids are already filesystem-safe ([A-Za-z0-9]); anything else
+# is hashed so a crafted id can never escape REFS_DIR (defense in depth).
+_SAFE_CONV_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 _DEFAULT_TOLERANCE = 0.25
 _DEFAULT_DETECTOR = "insightface"
 
@@ -118,13 +126,13 @@ _MAX_CACHE_AGE_SECONDS = 3 * 24 * 60 * 60
 # One active search per user at a time — /stop signals the matching Event.
 _active_searches: dict[str, threading.Event] = {}
 
-# One reference-photo collection at a time, system-wide (the reference set is
-# global, so concurrent collections would all write the same staging dir).
-# {"user_id": str, "count": int} while a /setref session is open, else None.
+# One reference-photo collection at a time per group/room (each writes its own
+# staging subdir, so different groups can collect concurrently). Maps conv id →
+# {"user_id": str, "count": int} while that group's /setref session is open.
 # In-memory only: a server restart mid-collection (e.g. the dev auto-reloader)
-# drops it, and the initiator just re-runs /setref — refs_staging/ keeps this
-# from ever corrupting the live refs/ set.
-_ref_collector: Optional[dict] = None
+# drops it, and the initiator just re-runs /setref — the staging subdir keeps
+# this from ever corrupting a group's live set. The lock guards the whole map.
+_ref_collectors: dict[str, dict] = {}
 _ref_lock = threading.Lock()
 
 # Per-group allowlist: only groups/rooms the admin has /approve'd may run
@@ -186,11 +194,28 @@ _ADMIN_DM_HELP = (
 )
 
 
-def _reference_photo_paths() -> list[str]:
-    if not REFS_DIR.exists():
+def _conv_dirname(conv_id: str) -> str:
+    """Filesystem-safe subdirectory name for a conversation's reference set."""
+    if _SAFE_CONV_ID_RE.match(conv_id):
+        return conv_id
+    return hashlib.sha256(conv_id.encode()).hexdigest()[:32]
+
+
+def _group_refs_dir(conv_id: str) -> Path:
+    return REFS_DIR / _conv_dirname(conv_id)
+
+
+def _group_staging_dir(conv_id: str) -> Path:
+    return REFS_STAGING_DIR / _conv_dirname(conv_id)
+
+
+def _reference_photo_paths(conv_id: str) -> list[str]:
+    """Live reference photos for one group/room, or [] if it has none set."""
+    refs_dir = _group_refs_dir(conv_id)
+    if not refs_dir.exists():
         return []
     return sorted(
-        str(p) for p in REFS_DIR.iterdir()
+        str(p) for p in refs_dir.iterdir()
         if p.is_file() and not p.name.startswith(".")
     )
 
@@ -404,43 +429,46 @@ def _start_ref_collection(event: MessageEvent, sender_id: Optional[str]) -> None
         _reply(event.reply_token, [_txt("無法識別你的使用者 ID，請改用其他裝置再試一次。")])
         return
 
-    global _ref_collector
+    conv_id = _group_or_room_id(event.source)
+    staging = _group_staging_dir(conv_id)
     with _ref_lock:
-        busy = _ref_collector is not None
+        busy = conv_id in _ref_collectors
         if not busy:
-            shutil.rmtree(REFS_STAGING_DIR, ignore_errors=True)
-            REFS_STAGING_DIR.mkdir(parents=True, exist_ok=True)
-            _ref_collector = {"user_id": sender_id, "count": 0}
+            shutil.rmtree(staging, ignore_errors=True)
+            staging.mkdir(parents=True, exist_ok=True)
+            _ref_collectors[conv_id] = {"user_id": sender_id, "count": 0}
 
     if busy:
-        _reply(event.reply_token, [_txt("已有人正在收集參考照片，請稍候。")])
+        _reply(event.reply_token, [_txt("這個群組已有人正在收集參考照片，請稍候。")])
         return
-    logger.info("setref start user=%s", sender_id)
+    logger.info("setref start conv=%s user=%s", conv_id, sender_id)
     _reply(event.reply_token, [_txt(
         "📸 開始收集參考照片。請傳送 3-5 張人像照片（只有你傳送的照片會被使用），完成後輸入 /done。"
     )])
 
 
 def _finish_ref_collection(event: MessageEvent, sender_id: Optional[str]) -> None:
-    global _ref_collector
+    conv_id = _group_or_room_id(event.source)
+    live = _group_refs_dir(conv_id)
+    staging = _group_staging_dir(conv_id)
     count = 0
     with _ref_lock:
-        collector = _ref_collector
+        collector = _ref_collectors.get(conv_id)
         if collector is None:
             action = "none"
         elif collector["user_id"] != sender_id:
             action = "not_owner"
         elif collector["count"] == 0:
-            _ref_collector = None
+            del _ref_collectors[conv_id]
             action = "empty"
         else:
             count = collector["count"]
-            # Atomically swap staging into the live set: drop the old refs/,
-            # promote refs_staging/ → refs/, then recreate an empty staging dir.
-            shutil.rmtree(REFS_DIR, ignore_errors=True)
-            REFS_STAGING_DIR.rename(REFS_DIR)
-            REFS_STAGING_DIR.mkdir(parents=True, exist_ok=True)
-            _ref_collector = None
+            # Atomically swap staging into this group's live set: drop its old
+            # refs subdir, then promote its staging subdir in place.
+            shutil.rmtree(live, ignore_errors=True)
+            live.parent.mkdir(parents=True, exist_ok=True)
+            staging.rename(live)
+            del _ref_collectors[conv_id]
             action = "done"
 
     if action == "none":
@@ -467,8 +495,9 @@ def on_image(event: MessageEvent) -> None:
     if event.source.type == "user":
         return
     sender_id = _sender_id(event.source)
+    conv_id = _group_or_room_id(event.source)
 
-    collector = _ref_collector
+    collector = _ref_collectors.get(conv_id)
     if collector is None or not sender_id or sender_id != collector["user_id"]:
         return
 
@@ -480,13 +509,14 @@ def on_image(event: MessageEvent) -> None:
         logger.exception("on_image failed to fetch content")
         return
 
+    staging = _group_staging_dir(conv_id)
     with _ref_lock:
-        collector = _ref_collector
+        collector = _ref_collectors.get(conv_id)
         if collector is None or sender_id != collector["user_id"]:
             return  # collection ended or changed hands while we were fetching
         idx = collector["count"]
-        REFS_STAGING_DIR.mkdir(parents=True, exist_ok=True)
-        (REFS_STAGING_DIR / f"ref_{idx}.jpg").write_bytes(content)
+        staging.mkdir(parents=True, exist_ok=True)
+        (staging / f"ref_{idx}.jpg").write_bytes(content)
         collector["count"] = idx + 1
         count = collector["count"]
 
@@ -703,9 +733,9 @@ def _run_search(target_id: str, urls: list[str], stop_event: threading.Event) ->
 
         logger.info("search start target=%s urls=%d album_id=%s", target_id, len(urls), album_id)
 
-        ref_paths = _reference_photo_paths()
+        ref_paths = _reference_photo_paths(target_id)
         if not ref_paths:
-            _push(target_id, [_txt("❌ 尚未設定參考照片，請先使用 /setref 設定。")])
+            _push(target_id, [_txt("❌ 這個群組尚未設定參考照片，請先使用 /setref 設定。")])
             return
 
         known = encode_references(ref_paths, detector=_DEFAULT_DETECTOR)

@@ -93,16 +93,17 @@ with `/approve <group id>` (or `/revoke <group id>`); `/groups` lists all enable
 ids. See `line_bot.py`'s module docstring for details.
 
 **Usage:** in an approved group, send any message containing a Google Drive
-folder link and the bot searches it against the shared reference photos, replying
+folder link and the bot searches it against that group's reference photos, replying
 with matches (or a link to a web album if there are more than 10). `/help` lists
 commands; `/stop` cancels an in-progress search.
 
-**Reference photos** are set in-chat, not hardcoded. Send `/setref`, then send
-3–5 portrait photos of the target person (only the initiator's photos count),
-then `/done` to commit them. The set is global — one shared set across every
-group the bot is in — and is stored under `refs/` (staged in `refs_staging/`
-until `/done`, so an abandoned collection never breaks the live set). Until a
-set exists, searches reply asking you to run `/setref` first. See
+**Reference photos** are set in-chat, not hardcoded, and are **per group** — each
+group (or room) targets its own person. Send `/setref`, then send 3–5 portrait
+photos of the target person (only the initiator's photos count), then `/done` to
+commit them. Each group's live set is stored under `refs/<group id>/` (staged in
+`refs_staging/<group id>/` until `/done`, so an abandoned collection never breaks
+that group's live set); groups are fully isolated with no shared fallback. Until a
+group has run `/setref`, its searches reply asking you to run `/setref` first. See
 `docs/superpowers/specs/2026-07-10-line-bot-dynamic-refs-design.md` for the
 full design.
 
