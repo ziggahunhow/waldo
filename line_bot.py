@@ -14,9 +14,16 @@ Flow
   message events) rather than the group member-list API, which requires a
   verified/premium LINE account.
 
+  Remote approval: the admin can also manage groups they aren't a member of
+  from their 1:1 chat with the bot — /approve <group id>, /revoke <group id>,
+  /groups (list enabled ids). To surface the id, the bot DMs the admin the
+  group id whenever it's added to an unapproved group (JoinEvent) or when such
+  a group first attempts a search (once per group per process).
+
   Commands: /help (show usage), /approve … /revoke (admin: enable/disable
-  this group), /setref … /done (collect the shared reference photos in-chat),
-  /stop (cancel the caller's active search).
+  this group; in a DM take a group id argument), /groups (admin DM: list
+  enabled groups), /setref … /done (collect the shared reference photos
+  in-chat), /stop (cancel the caller's active search).
 
   Any other text message: extract Google Drive folder link(s) → download
   images to cache → match against the collected reference photos → reply with
@@ -168,6 +175,16 @@ _HELP_TEXT = (
     "使用方式：直接傳送包含 Google Drive 資料夾連結的訊息，我就會開始搜尋符合的照片。"
 )
 
+# Admin-only commands usable in a 1:1 chat with the bot, so the admin can
+# approve/revoke groups they aren't a member of (they can't type /approve there).
+_ADMIN_DM_HELP = (
+    "📖 管理員指令（私訊）：\n"
+    "/groups — 列出已啟用的群組 ID\n"
+    "/approve <群組 ID> — 啟用指定群組\n"
+    "/revoke <群組 ID> — 停用指定群組\n\n"
+    "當我被加入尚未啟用的群組時，會私訊你該群組的 ID。"
+)
+
 
 def _reference_photo_paths() -> list[str]:
     if not REFS_DIR.exists():
@@ -312,6 +329,9 @@ def on_text(event: MessageEvent) -> None:
     logger.info("on_text target=%s text=%r", target_id, text)
 
     if event.source.type == "user":
+        # Admins can manage remote groups from their 1:1 chat with the bot.
+        if _is_admin(event.source) and _handle_admin_dm(event, text):
+            return
         _reply(event.reply_token, [_txt("此機器人僅限群組使用，請將我加入群組後再試。")])
         return
 
@@ -489,15 +509,36 @@ def _is_admin(source) -> bool:
     return bool(admin_id) and _sender_id(source) == admin_id
 
 
+# Groups we've already DM'd the admin about (in-memory; a fresh reminder after
+# a restart is fine). Covers groups the bot was already in before remote
+# approval existed, where no JoinEvent fires to trigger the notification.
+_pending_notified: set[str] = set()
+
+
 def _require_approved(event) -> bool:
     """Gate for operational commands. Replies with how to enable and returns
-    False when this group/room isn't on the allowlist."""
-    if _is_approved(_group_or_room_id(event.source)):
+    False when this group/room isn't on the allowlist. Also pings the admin
+    once (per group, per process) so they can approve it remotely."""
+    conv_id = _group_or_room_id(event.source)
+    if _is_approved(conv_id):
         return True
     _reply(event.reply_token, [_txt(
         "⚠️ 這個群組尚未啟用，請管理員在這裡輸入 /approve 以啟用。"
     )])
+    if conv_id not in _pending_notified:
+        _pending_notified.add(conv_id)
+        _notify_admin(_pending_group_notice(conv_id, joined=False))
     return False
+
+
+def _pending_group_notice(conv_id: str, joined: bool) -> str:
+    lead = "🔔 我被加入了一個尚未啟用的群組。" if joined else \
+        "🔔 有一個尚未啟用的群組嘗試使用搜尋功能。"
+    return (
+        f"{lead}\n"
+        f"群組 ID：\n{conv_id}\n\n"
+        f"回覆「/approve {conv_id}」即可啟用。"
+    )
 
 
 def _handle_approval(event, approve: bool) -> None:
@@ -514,6 +555,75 @@ def _handle_approval(event, approve: bool) -> None:
         )])
     else:
         _reply(event.reply_token, [_txt("🚫 已停用，這個群組已無法使用搜尋功能。")])
+
+
+def _notify_admin(text: str) -> None:
+    """Best-effort DM to the configured admin. No-ops if no admin is set, and
+    swallows push errors (e.g. the admin has never opened a 1:1 chat, so the
+    bot has no permission to message them)."""
+    admin_id = os.environ.get("ADMIN_LINE_USER_ID", "").strip()
+    if not admin_id:
+        return
+    try:
+        _push(admin_id, [_txt(text)])
+    except Exception:
+        logger.exception("failed to notify admin")
+
+
+def _handle_admin_dm(event, text: str) -> bool:
+    """Handle admin-only commands sent in the 1:1 chat with the bot. This lets
+    the admin approve/revoke groups they aren't a member of by naming the group
+    id explicitly. Returns True if the text was an admin command (and handled),
+    False otherwise so the caller can fall through to the default DM reply.
+
+    Caller must have already confirmed the sender is the admin."""
+    parts = text.split()
+    cmd = parts[0].lower() if parts else ""
+
+    if cmd == "/help":
+        _reply(event.reply_token, [_txt(_ADMIN_DM_HELP)])
+        return True
+
+    if cmd == "/groups":
+        with _approved_lock:
+            groups = sorted(_approved_groups)
+        if groups:
+            listing = "\n".join(groups)
+            _reply(event.reply_token, [_txt(
+                f"✅ 已啟用的群組（{len(groups)}）：\n{listing}"
+            )])
+        else:
+            _reply(event.reply_token, [_txt("目前沒有已啟用的群組。")])
+        return True
+
+    if cmd in ("/approve", "/revoke"):
+        approve = cmd == "/approve"
+        if len(parts) < 2:
+            _reply(event.reply_token, [_txt(
+                f"用法：{cmd} <群組 ID>\n輸入 /groups 查看已啟用的群組 ID。"
+            )])
+            return True
+        conv_id = parts[1].strip()
+        _set_approved(conv_id, approve)
+        logger.info(
+            "approval set conv=%s approved=%s by admin (remote DM)", conv_id, approve
+        )
+        if approve:
+            _reply(event.reply_token, [_txt(f"✅ 已啟用群組：\n{conv_id}")])
+            # Let the group itself know it's live (best-effort — the bot may
+            # not be in that group, in which case the push simply fails).
+            try:
+                _push(conv_id, [_txt(
+                    "✅ 已啟用！這個群組現在可以使用搜尋功能了，"
+                    "傳送 Google Drive 資料夾連結即可開始。"
+                )])
+            except Exception:
+                logger.exception("failed to announce approval to group %s", conv_id)
+        else:
+            _reply(event.reply_token, [_txt(f"🚫 已停用群組：\n{conv_id}")])
+        return True
+
+    return False
 
 
 @handler.add(JoinEvent)
@@ -534,6 +644,10 @@ def on_join(event: JoinEvent) -> None:
         _reply(event.reply_token, [_txt(
             "👋 哈囉！請管理員在這個群組輸入 /approve 以啟用搜尋功能。"
         )])
+        # DM the admin the group id so they can approve it even if they aren't
+        # a member here. Mark it notified so _require_approved doesn't re-ping.
+        _pending_notified.add(conv_id)
+        _notify_admin(_pending_group_notice(conv_id, joined=True))
 
 
 # ── Background search ──────────────────────────────────────────────────────────

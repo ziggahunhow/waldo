@@ -362,15 +362,106 @@ def test_revoke_by_admin_disables_group(mock_reply, mock_set):
     assert "已停用" in _reply_text(mock_reply)
 
 
+@patch("line_bot._notify_admin")
 @patch("line_bot.threading.Thread")
 @patch("line_bot._reply")
-def test_search_blocked_in_unapproved_group(mock_reply, mock_thread, monkeypatch):
+def test_search_blocked_in_unapproved_group(mock_reply, mock_thread, mock_notify, monkeypatch):
     monkeypatch.setattr(line_bot, "_approved_groups", set())
+    monkeypatch.setattr(line_bot, "_pending_notified", set())
     url = "https://drive.google.com/drive/folders/abc123"
     line_bot.on_text(_fake_cmd_event(url, group_id="G_unapproved"))
 
     mock_thread.assert_not_called()
     assert "尚未啟用" in _reply_text(mock_reply)
+
+
+# ── Remote (DM) admin approval for groups the admin isn't in ──────────────────────
+
+def _fake_dm_event(text, user_id="U_admin", reply_token="reply-token"):
+    return SimpleNamespace(
+        source=SimpleNamespace(type="user", user_id=user_id),
+        reply_token=reply_token,
+        message=SimpleNamespace(text=text),
+    )
+
+
+@patch.dict("os.environ", {"ADMIN_LINE_USER_ID": "U_admin"}, clear=True)
+@patch("line_bot._push")
+@patch("line_bot._set_approved")
+@patch("line_bot._reply")
+def test_admin_dm_approve_enables_named_group(mock_reply, mock_set, mock_push):
+    line_bot.on_text(_fake_dm_event("/approve G_remote"))
+
+    mock_set.assert_called_once_with("G_remote", True)
+    assert "G_remote" in _reply_text(mock_reply)
+
+
+@patch.dict("os.environ", {"ADMIN_LINE_USER_ID": "U_admin"}, clear=True)
+@patch("line_bot._push")
+@patch("line_bot._set_approved")
+@patch("line_bot._reply")
+def test_admin_dm_revoke_disables_named_group(mock_reply, mock_set, mock_push):
+    line_bot.on_text(_fake_dm_event("/revoke G_remote"))
+
+    mock_set.assert_called_once_with("G_remote", False)
+    assert "已停用" in _reply_text(mock_reply)
+
+
+@patch.dict("os.environ", {"ADMIN_LINE_USER_ID": "U_admin"}, clear=True)
+@patch("line_bot._set_approved")
+@patch("line_bot._reply")
+def test_admin_dm_approve_without_id_shows_usage(mock_reply, mock_set):
+    line_bot.on_text(_fake_dm_event("/approve"))
+
+    mock_set.assert_not_called()
+    assert "用法" in _reply_text(mock_reply)
+
+
+@patch.dict("os.environ", {"ADMIN_LINE_USER_ID": "U_admin"}, clear=True)
+@patch("line_bot._set_approved")
+@patch("line_bot._reply")
+def test_non_admin_dm_approve_falls_through_to_group_only_notice(mock_reply, mock_set):
+    line_bot.on_text(_fake_dm_event("/approve G_remote", user_id="U_other"))
+
+    mock_set.assert_not_called()
+    assert "僅限群組使用" in _reply_text(mock_reply)
+
+
+@patch.dict("os.environ", {"ADMIN_LINE_USER_ID": "U_admin"}, clear=True)
+@patch("line_bot._reply")
+def test_admin_dm_groups_lists_approved(mock_reply, monkeypatch):
+    monkeypatch.setattr(line_bot, "_approved_groups", {"G_one", "G_two"})
+    line_bot.on_text(_fake_dm_event("/groups"))
+
+    text = _reply_text(mock_reply)
+    assert "G_one" in text and "G_two" in text
+
+
+@patch.dict("os.environ", {"ADMIN_LINE_USER_ID": "U_admin"}, clear=True)
+@patch("line_bot._notify_admin")
+@patch("line_bot._reply")
+def test_on_join_notifies_admin_with_group_id(mock_reply, mock_notify, monkeypatch):
+    monkeypatch.setattr(line_bot, "_approved_groups", set())
+    monkeypatch.setattr(line_bot, "_pending_notified", set())
+    source = SimpleNamespace(type="group", group_id="G_new2", user_id=None)
+    line_bot.on_join(_fake_join_event(source))
+
+    mock_notify.assert_called_once()
+    assert "G_new2" in mock_notify.call_args[0][0]
+
+
+@patch("line_bot._notify_admin")
+@patch("line_bot.threading.Thread")
+@patch("line_bot._reply")
+def test_unapproved_search_notifies_admin_once(mock_reply, mock_thread, mock_notify, monkeypatch):
+    monkeypatch.setattr(line_bot, "_approved_groups", set())
+    monkeypatch.setattr(line_bot, "_pending_notified", set())
+    url = "https://drive.google.com/drive/folders/abc123"
+    line_bot.on_text(_fake_cmd_event(url, group_id="G_pending"))
+    line_bot.on_text(_fake_cmd_event(url, group_id="G_pending"))
+
+    mock_notify.assert_called_once()
+    assert "G_pending" in mock_notify.call_args[0][0]
 
 
 def test_set_approved_persists_atomically(tmp_path, monkeypatch):

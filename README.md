@@ -84,8 +84,13 @@ each group must be approved before it can do anything. When added to a group it
 stays but stays inert until the admin (`ADMIN_LINE_USER_ID`) sends `/approve` in
 that chat; `/revoke` disables it again. Approvals persist in `approved_groups.json`.
 The admin is identified by the message sender's user id, so this works on an
-unverified LINE account (no member-list API needed). See `line_bot.py`'s module
-docstring for details.
+unverified LINE account (no member-list API needed).
+
+**Remote approval:** the admin can also enable a group they aren't a member of.
+Whenever the bot is added to an unapproved group (or such a group first tries to
+search), it DMs the admin that group's id. The admin then messages the bot 1:1
+with `/approve <group id>` (or `/revoke <group id>`); `/groups` lists all enabled
+ids. See `line_bot.py`'s module docstring for details.
 
 **Usage:** in an approved group, send any message containing a Google Drive
 folder link and the bot searches it against the shared reference photos, replying
