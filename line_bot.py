@@ -112,6 +112,22 @@ REFS_STAGING_DIR = Path(__file__).parent / "refs_staging"
 # LINE group/room ids are already filesystem-safe ([A-Za-z0-9]); anything else
 # is hashed so a crafted id can never escape REFS_DIR (defense in depth).
 _SAFE_CONV_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+# Uploaded reference photos are validated before they're saved. Portraits are
+# downscaled to ~1800px for matching anyway, so a few MB is ample headroom for a
+# high-res phone photo; the cap just stops oversized or non-image uploads from
+# filling disk or crashing the decoder. Only still-image formats the recognizer
+# can actually load are accepted, and each is saved with the matching extension
+# (recognizer._load_image selects the HEIF opener by extension).
+_MAX_REF_IMAGE_BYTES = 5 * 1024 * 1024
+_REF_FORMAT_EXT = {
+    "JPEG": ".jpg",
+    "MPO": ".jpg",   # multi-picture JPEG from some phone cameras
+    "PNG": ".png",
+    "WEBP": ".webp",
+    "HEIF": ".heic",
+    "HEIC": ".heic",
+}
 _DEFAULT_TOLERANCE = 0.25
 _DEFAULT_DETECTOR = "insightface"
 
@@ -487,6 +503,48 @@ def _get_image_bytes(message_id: str) -> bytes:
         return bytes(MessagingApiBlob(client).get_message_content(message_id))
 
 
+class _RefImageError(Exception):
+    """Raised with a user-facing (zh) reason when an uploaded reference photo
+    fails validation."""
+
+
+def _validate_ref_image(content: bytes) -> str:
+    """Check an uploaded reference photo's size and format. Returns the file
+    extension to save it under (e.g. ".jpg") on success, or raises
+    _RefImageError(<user message>) if it's too big or not a supported image."""
+    if len(content) > _MAX_REF_IMAGE_BYTES:
+        limit_mb = _MAX_REF_IMAGE_BYTES / (1024 * 1024)
+        actual_mb = len(content) / (1024 * 1024)
+        raise _RefImageError(
+            f"⚠️ 這張照片太大了（{actual_mb:.1f}MB），"
+            f"請傳送小於 {limit_mb:.0f}MB 的照片。"
+        )
+
+    from io import BytesIO
+    from PIL import Image
+    try:  # so an .heic upload is recognised rather than rejected
+        import pillow_heif
+        pillow_heif.register_heif_opener()
+    except Exception:
+        pass
+
+    try:
+        with Image.open(BytesIO(content)) as img:
+            fmt = img.format
+            img.verify()  # catches truncated / corrupt data
+    except Exception:
+        raise _RefImageError(
+            "⚠️ 這張照片無法辨識，請確認是有效的圖片檔（JPEG/PNG）。"
+        )
+
+    ext = _REF_FORMAT_EXT.get(fmt or "")
+    if ext is None:
+        raise _RefImageError(
+            f"⚠️ 不支援的圖片格式（{fmt}），請傳送 JPEG 或 PNG 照片。"
+        )
+    return ext
+
+
 @handler.add(MessageEvent, message=ImageMessageContent)
 def on_image(event: MessageEvent) -> None:
     # Only meaningful mid-collection, and only in groups/rooms (DMs rejected
@@ -509,6 +567,14 @@ def on_image(event: MessageEvent) -> None:
         logger.exception("on_image failed to fetch content")
         return
 
+    # Reject oversized or non-image uploads before they reach the staging dir.
+    try:
+        ext = _validate_ref_image(content)
+    except _RefImageError as e:
+        logger.info("on_image rejected upload conv=%s: %s", conv_id, e)
+        _reply(event.reply_token, [_txt(str(e))])
+        return
+
     staging = _group_staging_dir(conv_id)
     with _ref_lock:
         collector = _ref_collectors.get(conv_id)
@@ -516,7 +582,7 @@ def on_image(event: MessageEvent) -> None:
             return  # collection ended or changed hands while we were fetching
         idx = collector["count"]
         staging.mkdir(parents=True, exist_ok=True)
-        (staging / f"ref_{idx}.jpg").write_bytes(content)
+        (staging / f"ref_{idx}{ext}").write_bytes(content)
         collector["count"] = idx + 1
         count = collector["count"]
 

@@ -2,6 +2,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 import line_bot
 
 
@@ -514,6 +516,16 @@ def _fake_image_event(user_id, message_id="M1", reply_token="reply-token"):
     )
 
 
+def _img_bytes(fmt="JPEG", size=(64, 64), color=(255, 0, 0)):
+    """A real encoded image, so it passes _validate_ref_image."""
+    from io import BytesIO
+    from PIL import Image
+
+    buf = BytesIO()
+    Image.new("RGB", size, color).save(buf, format=fmt)
+    return buf.getvalue()
+
+
 def _stage_refs(tmp_path, monkeypatch):
     """Point REFS_DIR/REFS_STAGING_DIR at tmp dirs and reset collector state.
     Returns the ``G_ref`` group's own (live refs, staging) subdirectories,
@@ -561,15 +573,16 @@ def test_setref_errors_when_sender_id_missing(mock_reply, tmp_path, monkeypatch)
     assert "無法識別你的使用者 ID" in _reply_text(mock_reply)
 
 
-@patch("line_bot._get_image_bytes", return_value=b"jpegbytes")
 @patch("line_bot._reply")
-def test_on_image_from_initiator_is_saved(mock_reply, mock_get, tmp_path, monkeypatch):
+def test_on_image_from_initiator_is_saved(mock_reply, tmp_path, monkeypatch):
     _, staging = _stage_refs(tmp_path, monkeypatch)
     monkeypatch.setattr(line_bot, "_ref_collectors", {"G_ref": {"user_id": "U_init", "count": 0}})
+    jpeg = _img_bytes("JPEG")
 
-    line_bot.on_image(_fake_image_event("U_init"))
+    with patch("line_bot._get_image_bytes", return_value=jpeg):
+        line_bot.on_image(_fake_image_event("U_init"))
 
-    assert (staging / "ref_0.jpg").read_bytes() == b"jpegbytes"
+    assert (staging / "ref_0.jpg").read_bytes() == jpeg
     assert line_bot._ref_collectors["G_ref"]["count"] == 1
     assert "已收到第 1 張" in _reply_text(mock_reply)
 
@@ -653,7 +666,7 @@ def test_done_with_no_active_collection(mock_reply, tmp_path, monkeypatch):
     assert "目前沒有正在收集的參考照片" in _reply_text(mock_reply)
 
 
-@patch("line_bot._get_image_bytes", return_value=b"z")
+@patch("line_bot._get_image_bytes")
 @patch("line_bot._reply")
 def test_collections_in_different_groups_are_independent(mock_reply, mock_get, tmp_path, monkeypatch):
     refs_root = tmp_path / "refs"
@@ -685,8 +698,78 @@ def test_collections_in_different_groups_are_independent(mock_reply, mock_get, t
     assert set(line_bot._ref_collectors) == {"G_a", "G_b"}
 
     # A photo in G_a advances only G_a and lands in G_a's own staging dir.
+    jpeg = _img_bytes("JPEG")
+    mock_get.return_value = jpeg
     line_bot.on_image(_grp_image("G_a", "U1"))
     assert line_bot._ref_collectors["G_a"]["count"] == 1
     assert line_bot._ref_collectors["G_b"]["count"] == 0
-    assert (staging_root / "G_a" / "ref_0.jpg").read_bytes() == b"z"
+    assert (staging_root / "G_a" / "ref_0.jpg").read_bytes() == jpeg
     assert not any((staging_root / "G_b").iterdir())  # G_b's collection has no photos yet
+
+
+# ── Reference photo upload validation (size + format) ─────────────────────────────
+
+def test_validate_ref_image_accepts_supported_formats():
+    assert line_bot._validate_ref_image(_img_bytes("JPEG")) == ".jpg"
+    assert line_bot._validate_ref_image(_img_bytes("PNG")) == ".png"
+    assert line_bot._validate_ref_image(_img_bytes("WEBP")) == ".webp"
+
+
+def test_validate_ref_image_rejects_oversized():
+    oversized = b"0" * (line_bot._MAX_REF_IMAGE_BYTES + 1)
+    with pytest.raises(line_bot._RefImageError) as exc:
+        line_bot._validate_ref_image(oversized)
+    assert "太大" in str(exc.value)
+
+
+def test_validate_ref_image_rejects_non_image():
+    with pytest.raises(line_bot._RefImageError) as exc:
+        line_bot._validate_ref_image(b"this is definitely not an image")
+    assert "無法辨識" in str(exc.value)
+
+
+def test_validate_ref_image_rejects_unsupported_format():
+    with pytest.raises(line_bot._RefImageError) as exc:
+        line_bot._validate_ref_image(_img_bytes("GIF"))
+    assert "不支援" in str(exc.value)
+
+
+@patch("line_bot._reply")
+def test_on_image_rejects_oversized_upload(mock_reply, tmp_path, monkeypatch):
+    _, staging = _stage_refs(tmp_path, monkeypatch)
+    monkeypatch.setattr(line_bot, "_ref_collectors", {"G_ref": {"user_id": "U_init", "count": 0}})
+    oversized = b"0" * (line_bot._MAX_REF_IMAGE_BYTES + 1)
+
+    with patch("line_bot._get_image_bytes", return_value=oversized):
+        line_bot.on_image(_fake_image_event("U_init"))
+
+    assert line_bot._ref_collectors["G_ref"]["count"] == 0  # not counted
+    assert not staging.exists()  # nothing written
+    assert "太大" in _reply_text(mock_reply)
+
+
+@patch("line_bot._reply")
+def test_on_image_rejects_non_image_upload(mock_reply, tmp_path, monkeypatch):
+    _, staging = _stage_refs(tmp_path, monkeypatch)
+    monkeypatch.setattr(line_bot, "_ref_collectors", {"G_ref": {"user_id": "U_init", "count": 0}})
+
+    with patch("line_bot._get_image_bytes", return_value=b"garbage-bytes"):
+        line_bot.on_image(_fake_image_event("U_init"))
+
+    assert line_bot._ref_collectors["G_ref"]["count"] == 0
+    assert not staging.exists()
+    assert "無法辨識" in _reply_text(mock_reply)
+
+
+@patch("line_bot._reply")
+def test_on_image_saves_png_with_png_extension(mock_reply, tmp_path, monkeypatch):
+    _, staging = _stage_refs(tmp_path, monkeypatch)
+    monkeypatch.setattr(line_bot, "_ref_collectors", {"G_ref": {"user_id": "U_init", "count": 0}})
+    png = _img_bytes("PNG")
+
+    with patch("line_bot._get_image_bytes", return_value=png):
+        line_bot.on_image(_fake_image_event("U_init"))
+
+    # Saved under .png so recognizer._load_image opens it correctly.
+    assert (staging / "ref_0.png").read_bytes() == png
+    assert line_bot._ref_collectors["G_ref"]["count"] == 1

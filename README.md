@@ -100,10 +100,13 @@ commands; `/stop` cancels an in-progress search.
 **Reference photos** are set in-chat, not hardcoded, and are **per group** — each
 group (or room) targets its own person. Send `/setref`, then send 3–5 portrait
 photos of the target person (only the initiator's photos count), then `/done` to
-commit them. Each group's live set is stored under `refs/<group id>/` (staged in
-`refs_staging/<group id>/` until `/done`, so an abandoned collection never breaks
-that group's live set); groups are fully isolated with no shared fallback. Until a
-group has run `/setref`, its searches reply asking you to run `/setref` first. See
+commit them. Each uploaded photo is validated — it must be a supported still image
+(JPEG, PNG, WebP, or HEIC) no larger than 5 MB, or the bot rejects it and asks for
+another; valid photos are saved with the matching extension. Each group's live set
+is stored under `refs/<group id>/` (staged in `refs_staging/<group id>/` until
+`/done`, so an abandoned collection never breaks that group's live set); groups are
+fully isolated with no shared fallback. Until a group has run `/setref`, its
+searches reply asking you to run `/setref` first. See
 `docs/superpowers/specs/2026-07-10-line-bot-dynamic-refs-design.md` for the
 full design.
 
